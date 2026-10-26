@@ -334,6 +334,9 @@ input, textarea, select { color: var(--ink); }
 .empty-state { display: flex; min-height: 340px; align-items: center; justify-content: center; flex-direction: column; padding: 40px; border: 1px dashed var(--border-strong); border-radius: 10px; color: var(--ink-soft); background: white; text-align: center; }
 .empty-state h2 { margin: 12px 0 4px; color: var(--ink); font-size: 16px; }
 .empty-state p { margin: 0 0 16px; }
+.empty-state-icon { display: grid; width: 48px; height: 48px; place-items: center; border-radius: 12px; color: var(--primary); background: var(--primary-soft); }
+.empty-state-compact { min-height: 220px; border: 0; border-radius: 0; }
+.empty-state-compact h2 { font-size: 15px; }
 
 .back-link { display: inline-flex; width: fit-content; min-height: 32px; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--primary-dark); background: transparent; font-weight: 600; }
 .kb-hero { display: flex; align-items: center; gap: 14px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: white; }
@@ -443,7 +446,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 .wizard-done { color: var(--success) !important; }
 .wizard-done span { border-color: var(--success); color: white; background: var(--success); }
 .wizard-body { min-height: 240px; }
-.drop-zone { display: flex; width: 100%; min-height: 165px; align-items: center; justify-content: center; flex-direction: column; gap: 7px; border: 1px dashed #9aa8bc; border-radius: 10px; color: var(--ink-soft); background: var(--surface-soft); }
+.drop-zone { display: flex; width: 100%; min-height: 165px; align-items: center; justify-content: center; flex-direction: column; gap: 7px; border: 1px dashed #9aa8bc; border-radius: 10px; color: var(--ink-soft); background: var(--surface-soft); cursor: pointer; }
 .drop-zone:hover { border-color: var(--primary); background: var(--surface-blue); }
 .drop-zone svg { color: var(--primary); }
 .drop-zone strong { color: var(--ink); }
@@ -468,6 +471,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 .confirm-grid .privacy-note { grid-column: 1 / -1; }
 
 .chat-layout { display: grid; height: calc(100dvh - 137px); min-height: 580px; max-width: 1440px; margin: 0 auto; grid-template-columns: minmax(0, 1fr) 330px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: white; }
+.chat-layout.chat-layout-empty { grid-template-columns: 1fr; }
 .chat-panel { position: relative; display: flex; min-width: 0; flex-direction: column; }
 .chat-empty { display: flex; max-width: 650px; margin: auto; align-items: center; flex-direction: column; padding: 36px 24px 150px; text-align: center; }
 .chat-orbit { display: grid; width: 52px; height: 52px; place-items: center; border: 1px solid #c8d3f7; border-radius: 50%; color: var(--primary); background: var(--surface-blue); box-shadow: 0 0 0 8px #f7f8ff; }
@@ -501,6 +505,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 .composer-footer > span { display: flex; align-items: center; gap: 5px; }
 .composer-footer button { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: 7px; color: white; background: var(--primary); }
 .composer-footer button:disabled { background: #b8c0ce; }
+.composer-disabled { box-shadow: none; }
+.composer-disabled textarea:disabled { color: var(--ink-faint); background: var(--surface-soft); cursor: not-allowed; }
 .citation-panel, .log-detail { overflow-y: auto; border-left: 1px solid var(--border); background: var(--surface-soft); }
 .citation-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--border); }
 .citation-heading h2 { margin: 0; font-size: 14px; }
@@ -537,6 +543,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 .defaults-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 16px 18px; }
 
 .logs-layout { display: grid; height: calc(100dvh - 137px); min-height: 580px; max-width: 1440px; margin: 0 auto; grid-template-columns: minmax(0, 1fr) 330px; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: white; }
+.logs-layout.logs-layout-empty { grid-template-columns: 1fr; }
 .logs-table-panel { border: 0; border-radius: 0; }
 .log-filters { display: flex; gap: 9px; padding: 12px; border-bottom: 1px solid var(--border); }
 .log-filters .search-box { flex: 1; }
