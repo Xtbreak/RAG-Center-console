@@ -147,6 +147,8 @@ def _knowledge_base_reads(db: Session, bases: list[KnowledgeBase]) -> list[Knowl
             vector_dimension=kb.vector_dimension,
             chunk_size=kb.chunk_size,
             chunk_overlap=kb.chunk_overlap,
+            chunk_method=kb.chunk_method,
+            heading_level=kb.heading_level,
             status=kb.status,
             rebuild_error=kb.rebuild_error,
             document_count=documents.get(kb.id, 0),
@@ -174,6 +176,10 @@ def _document_read(document: Document) -> DocumentRead:
         error_message=document.error_message,
         parse_strategy=document.parse_strategy,
         enhance_images=document.enhance_images,
+        chunk_method=document.chunk_method,
+        chunk_size=document.chunk_size,
+        chunk_overlap=document.chunk_overlap,
+        heading_level=document.heading_level,
         chunk_count=document.chunk_count,
         job_id=job.id if job else None,
         job_status=job.status if job else None,
@@ -216,6 +222,8 @@ def create_knowledge_base(
         collection_name=collection_name(knowledge_base_id),
         chunk_size=payload.chunk_size,
         chunk_overlap=payload.chunk_overlap,
+        chunk_method=payload.chunk_method,
+        heading_level=payload.heading_level,
     )
     db.add(kb)
     try:
@@ -326,11 +334,20 @@ def upload_document(
     parse_strategy: Literal["smart", "fast"] = Form("smart"),
     enhance_images: bool = Form(True),
     allow_duplicate: bool = Form(False),
+    chunk_method: Literal["heading", "recursive"] | None = Form(None),
+    chunk_size: int | None = Form(None, ge=100, le=4000),
+    chunk_overlap: int | None = Form(None, ge=0, le=1000),
+    heading_level: int | None = Form(None, ge=1, le=6),
     _=Depends(require_knowledge_manager),
     db: Session = Depends(get_db),
 ) -> DocumentRead:
     kb = _knowledge_base_or_404(db, knowledge_base_id)
     _ensure_not_rebuilding(kb)
+    # 未指定的切分参数使用知识库默认值
+    size = chunk_size if chunk_size is not None else kb.chunk_size
+    overlap = chunk_overlap if chunk_overlap is not None else kb.chunk_overlap
+    if overlap >= size:
+        raise HTTPException(status_code=422, detail="分段重叠必须小于分段长度")
     settings = get_settings()
     try:
         upload = spool_upload(file.filename, file.content_type, file.file, settings.max_upload_bytes)
@@ -376,6 +393,10 @@ def upload_document(
         storage_key=storage_key,
         parse_strategy=parse_strategy,
         enhance_images=enhance_images,
+        chunk_method=chunk_method or kb.chunk_method,
+        chunk_size=size,
+        chunk_overlap=overlap,
+        heading_level=heading_level if heading_level is not None else kb.heading_level,
     )
     job = IngestionJob()
     document.jobs.append(job)

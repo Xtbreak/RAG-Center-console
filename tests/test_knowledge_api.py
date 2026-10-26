@@ -271,3 +271,25 @@ def test_models_used_by_a_knowledge_base_cannot_be_deleted(env):
     assert response.status_code == 409 and "产品手册" in response.json()["detail"]
     provider_id = client.get("/api/v1/models").json()[0]["provider_id"]
     assert client.delete(f"/api/v1/providers/{provider_id}").status_code == 409
+
+
+def test_chunk_method_defaults_overrides_and_validation(env):
+    client, *_ = env
+    kb = create_kb(client, chunk_method="recursive", heading_level=3, chunk_size=600, chunk_overlap=60)
+    assert (kb["chunk_method"], kb["heading_level"]) == ("recursive", 3)
+    assert client.post("/api/v1/knowledge-bases", json={"name": "x", "embedding_model_id": kb["embedding_model_id"], "chunk_method": "semantic"}).status_code == 422
+    assert client.post("/api/v1/knowledge-bases", json={"name": "y", "embedding_model_id": kb["embedding_model_id"], "heading_level": 7}).status_code == 422
+
+    inherited = upload(client, kb["id"]).json()
+    assert (inherited["chunk_method"], inherited["chunk_size"], inherited["chunk_overlap"], inherited["heading_level"]) == ("recursive", 600, 60, 3)
+
+    custom = upload(client, kb["id"], "b.md", "# 另一份".encode(), chunk_method="heading", chunk_size=1200, chunk_overlap=0, heading_level=2).json()
+    assert (custom["chunk_method"], custom["chunk_size"], custom["chunk_overlap"], custom["heading_level"]) == ("heading", 1200, 0, 2)
+
+    assert upload(client, kb["id"], "c.md", b"# c", chunk_size=100, chunk_overlap=100).status_code == 422
+    assert upload(client, kb["id"], "d.md", b"# d", chunk_size=50).status_code == 422
+
+    updated = client.patch(f"/api/v1/knowledge-bases/{kb['id']}", json={"chunk_method": "heading", "heading_level": 2}).json()
+    assert (updated["chunk_method"], updated["heading_level"]) == ("heading", 2)
+    documents = {d["filename"]: d for d in client.get(f"/api/v1/knowledge-bases/{kb['id']}/documents").json()}
+    assert documents["手册.md"]["chunk_method"] == "recursive"  # 已导入文档保留原设置

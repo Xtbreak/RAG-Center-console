@@ -220,7 +220,9 @@ def _pipeline(db: Session, services: PipelineServices, job: IngestionJob, docume
     _enhance_images(db, services, document, parsed, data, warnings)
 
     _set_stage(db, job, document, DocumentStatus.CHUNKING, 40)
-    drafts = chunk_document(parsed, kb.chunk_size, kb.chunk_overlap)
+    drafts = chunk_document(
+        parsed, document.chunk_size, document.chunk_overlap, document.chunk_method, document.heading_level
+    )
     if not drafts:
         raise ParseError("未能从文件中切分出有效内容")
     chunks = _store_chunks(db, kb, document, drafts)

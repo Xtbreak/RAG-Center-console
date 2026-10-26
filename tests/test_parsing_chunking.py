@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 from openpyxl import Workbook
 
-from rag_center_console.chunking import chunk_document, estimate_tokens
+from rag_center_console.chunking import chunk_document, detect_numbered_headings, estimate_tokens, recursive_split
 from rag_center_console.docmind import DocmindParser, ParseCancelled, layouts_to_elements
 from rag_center_console.parsing import Element, ParsedDocument, ParseError, parse_csv, parse_local, parse_markdown, parse_xlsx
 
@@ -100,6 +100,7 @@ def test_image_elements_become_image_chunks_and_estimate_tokens():
     chunk = chunk_document(parsed, 800, 100)[0]
     assert chunk.kind == "image" and chunk.location == {"heading_path": ["图"], "page": 2, "region": [1, 2]}
     assert estimate_tokens("你好world") == 2 + 2
+    assert estimate_tokens("你好，世界。") == 6  # 全角标点按 1 Token 计
 
 
 def test_layouts_map_titles_tables_images_and_skip_headers():
@@ -178,3 +179,111 @@ def test_sentence_splitting_keeps_spaces_and_paragraph_breaks():
     long_english = " ".join(f"Sentence number {i} is here." for i in range(40))
     pieces = chunk_document(ParsedDocument([Element("paragraph", long_english)]), 30, 0)
     assert len(pieces) > 3 and " ".join(p.content for p in pieces) == long_english
+
+
+
+def test_recursive_split_prefers_paragraphs_then_sentences_and_covers_text():
+    text = "第一段第一句。第一段第二句。\n\n第二段只有一句。\n\n" + "第三段很长，" * 30
+    spans = recursive_split(text, 20, 0)
+    pieces = [text[a:b] for a, b in spans]
+    assert pieces[0] == "第一段第一句。第一段第二句。"  # 整段放得下时不拆句子
+    assert pieces[1].startswith("第二段只有一句。")  # 小片段会与后续片段贪心合并
+    assert all(estimate_tokens(piece) <= 20 for piece in pieces)
+    assert "".join(pieces).replace("\n", "") == text.replace("\n", "")  # 无重叠时不丢字也不重复
+
+
+def test_recursive_split_overlap_repeats_tail_of_previous_chunk():
+    text = "".join(f"句子{i:02d}。" for i in range(40))
+    spans = recursive_split(text, 30, 10)
+    pieces = [text[a:b] for a, b in spans]
+    assert len(pieces) > 3 and all(estimate_tokens(p) <= 30 for p in pieces)
+    for previous, current in zip(pieces, pieces[1:]):
+        shared = max((k for k in range(1, len(current)) if previous.endswith(current[:k])), default=0)
+        assert shared and current[shared - 1] == "。"  # 重叠部分是上一段末尾的完整句子
+        assert 0 < estimate_tokens(current[:shared]) <= 10
+
+
+def test_recursive_split_hard_splits_unbroken_text_and_handles_english():
+    assert [b - a for a, b in recursive_split("字" * 250, 100, 0)] == [100, 100, 50]
+    english = "alpha beta gamma delta " * 20
+    pieces = [english[a:b] for a, b in recursive_split(english, 10, 0)]
+    assert all(not p.startswith(" ") and not p.endswith(" ") for p in pieces)
+    assert " ".join(pieces).split() == english.split()
+
+
+HEADING_DOC = """# 员工手册
+
+## 第一章 总则
+
+适用于全体员工。
+
+### 适用范围
+
+包括正式员工和实习生。
+
+## 第二章 考勤
+
+上班时间为九点。
+"""
+
+
+def test_heading_method_respects_level_and_keeps_deeper_headings_inside():
+    parsed = parse_markdown(HEADING_DOC.encode())
+    deep = chunk_document(parsed, 800, 0, "heading", 6)
+    assert [c.location["heading_path"] for c in deep] == [
+        ["员工手册", "第一章 总则"], ["员工手册", "第一章 总则", "适用范围"], ["员工手册", "第二章 考勤"]]
+    shallow = chunk_document(parsed, 800, 0, "heading", 2)
+    assert [c.location["heading_path"] for c in shallow] == [["员工手册", "第一章 总则"], ["员工手册", "第二章 考勤"]]
+    assert shallow[0].content == "适用于全体员工。\n\n适用范围\n\n包括正式员工和实习生。"
+
+
+def test_heading_method_splits_oversized_sections_with_the_same_path():
+    text = "# 长章节\n\n" + "\n\n".join("这一段用来测试超长章节的递归切分。" for _ in range(20))
+    chunks = chunk_document(parse_markdown(text.encode()), 50, 10, "heading", 6)
+    assert len(chunks) > 3 and all(c.token_count <= 50 for c in chunks)
+    assert all(c.location["heading_path"] == ["长章节"] for c in chunks)
+
+
+def test_recursive_method_ignores_heading_boundaries_but_records_start_location():
+    chunks = chunk_document(parse_markdown(HEADING_DOC.encode()), 800, 0, "recursive")
+    assert len(chunks) == 1
+    assert chunks[0].content.startswith("员工手册\n\n第一章 总则\n\n适用于全体员工。")
+    assert chunks[0].location["heading_path"] == ["员工手册"]
+    small = chunk_document(parse_markdown(HEADING_DOC.encode()), 12, 0, "recursive")
+    assert small[-1].location["heading_path"] == ["员工手册", "第二章 考勤"]
+    assert any("第二章 考勤" in c.content for c in small)
+
+
+def test_tables_and_images_stay_separate_in_recursive_method():
+    parsed = ParsedDocument([
+        Element("paragraph", "前文"), Element("table", header=["a"], rows=[["1"]]),
+        Element("paragraph", "后文"), Element("image", "图片文字", page=3),
+    ])
+    chunks = chunk_document(parsed, 800, 0, "recursive")
+    assert [(c.kind, c.content.split("\n")[0]) for c in chunks] == [
+        ("text", "前文"), ("table", "| a |"), ("text", "后文"), ("image", "图片文字")]
+
+
+def test_numbered_headings_are_detected_without_markdown_headings():
+    parsed = ParsedDocument([
+        Element("paragraph", "第一章 总则"),
+        Element("paragraph", "一、目的\n为规范管理，制定本制度。"),
+        Element("paragraph", "（一）适用对象"),
+        Element("paragraph", "1.1 定义"),
+        Element("paragraph", "第一条 本制度自发布之日起施行，由人事部负责解释。"),  # 过长且以句号结尾：正文
+        Element("paragraph", "1. 打开设置"),  # 单级阿拉伯编号常是列表项：不识别
+    ])
+    elements = detect_numbered_headings(parsed.elements)
+    headings = [(e.text, e.level) for e in elements if e.kind == "heading"]
+    assert headings == [("第一章 总则", 1), ("一、目的", 2), ("（一）适用对象", 3), ("1.1 定义", 4)]
+    assert any(e.kind == "paragraph" and e.text == "为规范管理，制定本制度。" for e in elements)
+    chunks = chunk_document(parsed, 800, 0, "heading", 2)
+    assert chunks[0].location["heading_path"] == ["第一章 总则", "一、目的"]
+    assert "（一）适用对象" in chunks[0].content
+
+
+def test_numbered_detection_is_skipped_when_markdown_headings_exist():
+    parsed = ParsedDocument([Element("heading", "标题", level=1), Element("paragraph", "一、不是标题")])
+    assert detect_numbered_headings(parsed.elements) is parsed.elements
+    sheet = [Element("heading", "Sheet1", level=1, sheet="Sheet1"), Element("paragraph", "第一章 总则")]
+    assert detect_numbered_headings(sheet)[1].kind == "heading"  # 工作表名不算 Markdown 标题

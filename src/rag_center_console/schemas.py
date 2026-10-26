@@ -152,12 +152,17 @@ class ModelDefaultsRead(ModelDefaultsUpdate):
     pass
 
 
+ChunkMethodName = Literal["heading", "recursive"]
+
+
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     embedding_model_id: str
     chunk_size: int = Field(default=800, ge=100, le=4000)
     chunk_overlap: int = Field(default=120, ge=0, le=1000)
+    chunk_method: ChunkMethodName = "heading"
+    heading_level: int = Field(default=6, ge=1, le=6)
 
     @model_validator(mode="after")
     def overlap_smaller_than_size(self):
@@ -172,6 +177,8 @@ class KnowledgeBaseUpdate(BaseModel):
     embedding_model_id: str | None = None
     chunk_size: int | None = Field(default=None, ge=100, le=4000)
     chunk_overlap: int | None = Field(default=None, ge=0, le=1000)
+    chunk_method: ChunkMethodName | None = None
+    heading_level: int | None = Field(default=None, ge=1, le=6)
 
 
 class KnowledgeBaseRead(BaseModel):
@@ -183,6 +190,8 @@ class KnowledgeBaseRead(BaseModel):
     vector_dimension: int
     chunk_size: int
     chunk_overlap: int
+    chunk_method: str
+    heading_level: int
     status: str
     rebuild_error: str | None
     document_count: int
@@ -205,6 +214,10 @@ class DocumentRead(BaseModel):
     error_message: str | None
     parse_strategy: str
     enhance_images: bool
+    chunk_method: str
+    chunk_size: int
+    chunk_overlap: int
+    heading_level: int
     chunk_count: int
     job_id: str | None
     job_status: str | None

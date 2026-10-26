@@ -101,7 +101,7 @@ def make_model(db, name="embed", dimension=4, protocol="OpenAI Embeddings", mode
     return model
 
 
-def make_job(h, *, filename="a.md", data=MARKDOWN.encode(), chunk_size=40, enhance=True, model=None):
+def make_job(h, *, filename="a.md", data=MARKDOWN.encode(), chunk_size=40, enhance=True, model=None, chunk_method="heading"):
     with SessionLocal() as db:
         model = model or make_model(db)
         kb = KnowledgeBase(name=f"库-{uuid4()}", embedding_model_id=model.id, vector_dimension=model.vector_dimension, collection_name="placeholder", chunk_size=chunk_size, chunk_overlap=0)
@@ -112,6 +112,7 @@ def make_job(h, *, filename="a.md", data=MARKDOWN.encode(), chunk_size=40, enhan
         document = Document(
             knowledge_base_id=kb.id, filename=filename, extension=extension, mime_type="text/markdown" if extension == "md" else "image/png",
             size_bytes=len(data), sha256="0" * 64, storage_key="pending", enhance_images=enhance,
+            chunk_size=chunk_size, chunk_overlap=0, chunk_method=chunk_method,
         )
         document.jobs.append(IngestionJob())
         db.add(document)
@@ -159,7 +160,7 @@ def test_partial_embedding_failure_is_reported(h):
         dashscope_id = dashscope.id
     with SessionLocal() as db:
         model = db.get(ModelDefinition, dashscope_id)
-        job_id, document_id, kb_id = make_job(h, data=many.encode(), chunk_size=15, model=model)
+        job_id, document_id, kb_id = make_job(h, data=many.encode(), chunk_size=30, model=model)
     run(h, job_id)
     document, job, chunks = state(document_id)
     assert document.status == "partial_failed" and job.status == "succeeded"
@@ -355,3 +356,16 @@ def test_purge_document_removes_points_objects_and_rows(h):
         purge_document(db, h.services, db.get(Document, document_id))
         assert db.scalar(select(func.count()).select_from(Chunk)) == 0
     assert h.vectors.count(collection_name(kb_id)) == 0 and h.storage.objects == {}
+
+
+
+def test_document_chunk_settings_are_used_instead_of_knowledge_base_defaults(h):
+    text = "# 手册\n\n" + "\n\n".join(f"第 {i} 段内容。" for i in range(6))
+    job_id, document_id, _ = make_job(h, data=text.encode(), chunk_size=800, chunk_method="recursive")
+    with SessionLocal() as db:
+        kb = db.get(Document, document_id).knowledge_base
+        kb.chunk_size, kb.chunk_method = 100, "heading"  # 知识库默认值后续修改不影响已导入文档
+        db.commit()
+    run(h, job_id)
+    _, _, chunks = state(document_id)
+    assert len(chunks) == 1 and chunks[0].content.startswith("手册\n\n第 0 段内容。")
