@@ -69,6 +69,32 @@ services:
     ports:
       - "8000:8000"
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      rustfs:
+        condition: service_started
+    command: ["uv", "run", "celery", "-A", "rag_center_console.worker", "worker", "--loglevel=info", "--pool=threads", "--concurrency=2"]
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["uv", "run", "celery", "-A", "rag_center_console.worker", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+
   web:
     build:
       context: .

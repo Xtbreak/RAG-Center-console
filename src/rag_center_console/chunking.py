@@ -7,7 +7,8 @@ from typing import Any
 from .parsing import Element, ParsedDocument
 
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
-_SENTENCE_END = re.compile(r"(?<=[。！？!?；;])|(?<=[.])\s+|\n+")
+# 零宽切分：分隔符（标点、空白、换行）都保留在片段里，拼接后与原文一致
+_SENTENCE_END = re.compile(r"(?<=[。！？!?；;\n])|(?<=[.])(?=\s)")
 
 
 def estimate_tokens(text: str) -> int:
@@ -30,7 +31,7 @@ class ChunkDraft:
 
 def _split_long_text(text: str, size: int, overlap: int) -> list[str]:
     """先按句子聚合；单句仍超长时按字符窗口硬切分，窗口之间保留重叠。"""
-    sentences = [part for part in _SENTENCE_END.split(text) if part and part.strip()]
+    sentences = [part for part in _SENTENCE_END.split(text) if part]
     pieces: list[str] = []
     current = ""
     for sentence in sentences:

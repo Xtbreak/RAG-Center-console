@@ -167,3 +167,13 @@ def test_docmind_sdk_errors_are_redacted():
     with pytest.raises(ParseError) as error:
         DocmindParser("id", "secret-123", "x", sdk_client=Broken([], []), sleep=lambda _: None).parse(b"x", "a.pdf", "pdf")
     assert "secret-123" not in str(error.value) and "***" in str(error.value)
+
+
+def test_sentence_splitting_keeps_spaces_and_paragraph_breaks():
+    english = chunk_document(ParsedDocument([Element("paragraph", "Hello world. Second sentence here.")]), 800, 0)
+    assert english[0].content == "Hello world. Second sentence here."
+    paragraphs = chunk_document(ParsedDocument([Element("paragraph", "第一段。"), Element("paragraph", "第二段。")]), 800, 0)
+    assert paragraphs[0].content == "第一段。\n\n第二段。"
+    long_english = " ".join(f"Sentence number {i} is here." for i in range(40))
+    pieces = chunk_document(ParsedDocument([Element("paragraph", long_english)]), 30, 0)
+    assert len(pieces) > 3 and " ".join(p.content for p in pieces) == long_english

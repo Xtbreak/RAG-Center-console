@@ -61,6 +61,7 @@ class VectorStatus(StrEnum):
 class KnowledgeBaseStatus(StrEnum):
     READY = "ready"
     REBUILDING = "rebuilding"
+    REBUILD_FAILED = "rebuild_failed"
 
 
 class AnonymousSession(Base):

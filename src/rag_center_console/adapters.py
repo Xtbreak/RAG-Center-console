@@ -609,3 +609,213 @@ async def probe_model(target: ProbeTarget, client: httpx.AsyncClient | None = No
     finally:
         if owns_client:
             await client.aclose()
+
+
+# 各协议单次请求可携带的文本条数上限（DashScope 文本向量接口单次最多 10 条）
+EMBEDDING_BATCH_SIZES = {
+    "OpenAI Embeddings": 64,
+    "DashScope Text Embeddings": 10,
+    "DashScope Multimodal Embeddings": 10,
+}
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+@dataclass(slots=True)
+class EmbeddingResult:
+    vectors: list[list[float]]
+    usage: dict[str, int | float] | None
+
+
+async def _post_json(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    api_key: str,
+    *,
+    attempts: int = 3,
+    sleep: Any = None,
+) -> Any:
+    import asyncio
+
+    pause = sleep or asyncio.sleep
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except httpx.TimeoutException as exc:
+            if attempt == attempts:
+                raise HealthCheckFailure("调用供应商超时") from exc
+        except httpx.RequestError as exc:
+            if attempt == attempts:
+                raise HealthCheckFailure(f"无法连接供应商：{exc.__class__.__name__}") from exc
+        else:
+            if response.status_code in RETRYABLE_STATUS and attempt < attempts:
+                await pause(2 ** (attempt - 1))
+                continue
+            if response.status_code >= 400:
+                raise HealthCheckFailure(_error_message(response, api_key))
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise HealthCheckFailure("供应商没有返回有效 JSON") from exc
+        await pause(2 ** (attempt - 1))
+    raise HealthCheckFailure("调用供应商失败")
+
+
+def _embedding_request(target: ProbeTarget, texts: list[str]) -> tuple[str, dict[str, str], dict[str, Any]]:
+    headers = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+    if target.protocol == "OpenAI Embeddings":
+        return _endpoint(target.base_url, "embeddings"), headers, {
+            "model": target.model_id,
+            "input": texts,
+            "encoding_format": "float",
+        }
+    if target.protocol == "DashScope Text Embeddings":
+        return _dashscope_native_url(target.base_url, "services/embeddings/text-embedding/text-embedding"), headers, {
+            "model": target.model_id,
+            "input": {"texts": texts},
+        }
+    if target.protocol == "DashScope Multimodal Embeddings":
+        return _dashscope_native_url(
+            target.base_url, "services/embeddings/multimodal-embedding/multimodal-embedding"
+        ), headers, {
+            "model": target.model_id,
+            "input": {"contents": [{"text": text} for text in texts]},
+        }
+    raise HealthCheckFailure(f"协议 {target.protocol} 不支持文本向量化")
+
+
+def _embedding_items(protocol: str, payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise HealthCheckFailure("供应商返回的 JSON 结构无效")
+    items = payload.get("data") if protocol == "OpenAI Embeddings" else (payload.get("output") or {}).get("embeddings")
+    if not isinstance(items, list):
+        raise HealthCheckFailure("响应缺少向量字段")
+    return items
+
+
+async def embed_texts(
+    target: ProbeTarget,
+    texts: list[str],
+    *,
+    expected_dimension: int | None = None,
+    client: httpx.AsyncClient | None = None,
+    sleep: Any = None,
+) -> EmbeddingResult:
+    """把文本转成向量，按协议的批量上限自动分批，返回顺序与输入一致。"""
+    if not texts:
+        return EmbeddingResult(vectors=[], usage=None)
+    batch_size = EMBEDDING_BATCH_SIZES.get(target.protocol)
+    if batch_size is None:
+        raise HealthCheckFailure(f"协议 {target.protocol} 不支持文本向量化")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    vectors: list[list[float]] = []
+    usage_total: dict[str, int | float] = {}
+    try:
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            url, headers, payload = _embedding_request(target, batch)
+            body = await _post_json(client, url, headers, payload, target.api_key, sleep=sleep)
+            items = _embedding_items(target.protocol, body)
+            if len(items) != len(batch):
+                raise HealthCheckFailure("供应商返回的向量数量与请求不一致")
+            ordered = sorted(items, key=lambda item: item.get("index", item.get("text_index", 0)))
+            for item in ordered:
+                vector = item.get("embedding")
+                if not isinstance(vector, list) or not vector:
+                    raise HealthCheckFailure("响应中的向量为空")
+                if expected_dimension is not None and len(vector) != expected_dimension:
+                    raise HealthCheckFailure(
+                        f"向量维度为 {len(vector)}，与知识库配置的 {expected_dimension} 不一致"
+                    )
+                vectors.append([float(value) for value in vector])
+            for key, value in (_usage(body) or {}).items():
+                usage_total[key] = usage_total.get(key, 0) + value
+    finally:
+        if owns_client:
+            await client.aclose()
+    return EmbeddingResult(vectors=vectors, usage=usage_total or None)
+
+
+IMAGE_PROMPT = "请用中文客观描述这张图片的内容，包括其中的文字、图表数据和关键信息，用于知识库检索。不要编造图片中没有的内容。"
+
+
+async def describe_image(
+    target: ProbeTarget,
+    image: bytes,
+    mime_type: str,
+    *,
+    prompt: str = IMAGE_PROMPT,
+    client: httpx.AsyncClient | None = None,
+    sleep: Any = None,
+) -> str:
+    """调用视觉模型生成图片的语义描述。"""
+    import base64
+
+    data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}"
+    bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+    if target.protocol == "OpenAI Chat Completions":
+        url, headers, payload = _endpoint(target.base_url, "chat/completions"), bearer, {
+            "model": target.model_id,
+            "max_tokens": 600,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+        }
+    elif target.protocol == "OpenAI Responses":
+        url, headers, payload = _endpoint(target.base_url, "responses"), bearer, {
+            "model": target.model_id,
+            "max_output_tokens": 600,
+            "input": [{"role": "user", "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": data_url},
+            ]}],
+        }
+    elif target.protocol == "Anthropic Messages":
+        url = _endpoint(target.base_url, "messages")
+        headers = {"x-api-key": target.api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+        payload = {
+            "model": target.model_id,
+            "max_tokens": 600,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": base64.b64encode(image).decode("ascii")}},
+                {"type": "text", "text": prompt},
+            ]}],
+        }
+    else:
+        raise HealthCheckFailure(f"协议 {target.protocol} 不支持图片理解")
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    try:
+        body = await _post_json(client, url, headers, payload, target.api_key, sleep=sleep)
+    finally:
+        if owns_client:
+            await client.aclose()
+    text = _extract_text(target.protocol, body)
+    if not text:
+        raise HealthCheckFailure("视觉模型没有返回描述")
+    return text
+
+
+def _extract_text(protocol: str, body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    if protocol == "OpenAI Chat Completions":
+        choices = body.get("choices") or [{}]
+        return str((choices[0].get("message") or {}).get("content") or "").strip()
+    if protocol == "OpenAI Responses":
+        if body.get("output_text"):
+            return str(body["output_text"]).strip()
+        parts = [
+            part.get("text", "")
+            for item in body.get("output") or []
+            for part in (item.get("content") or [] if isinstance(item, dict) else [])
+            if isinstance(part, dict)
+        ]
+        return "".join(parts).strip()
+    return "".join(block.get("text", "") for block in body.get("content") or [] if isinstance(block, dict)).strip()

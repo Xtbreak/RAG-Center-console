@@ -7,7 +7,9 @@ from rag_center_console.adapters import (
     DiscoveryTarget,
     HealthCheckFailure,
     ProbeTarget,
+    describe_image,
     discover_models,
+    embed_texts,
     infer_model_type,
     probe_model,
 )
@@ -318,3 +320,114 @@ async def test_model_discovery_error_does_not_echo_api_key():
 
     assert "discovery-secret" not in str(exc_info.value)
     assert "[REDACTED]" in str(exc_info.value)
+
+
+def _embedding_target(protocol="OpenAI Embeddings"):
+    return ProbeTarget("p", "custom", "https://api.example.test/v1", "sk-secret", "embed-1", protocol, 5)
+
+
+async def _no_sleep(_):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_batches_orders_by_index_and_sums_usage():
+    batches = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        batches.append(body["input"])
+        data = [{"index": i, "embedding": [float(len(text)), 1.0]} for i, text in enumerate(body["input"])]
+        return httpx.Response(200, json={"data": list(reversed(data)), "usage": {"total_tokens": len(data)}})
+
+    texts = [("x" * n) for n in range(1, 71)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await embed_texts(_embedding_target(), texts, expected_dimension=2, client=client)
+    assert [len(b) for b in batches] == [64, 6]
+    assert [v[0] for v in result.vectors] == [float(n) for n in range(1, 71)]
+    assert result.usage == {"total_tokens": 70}
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_dashscope_text_uses_texts_field_and_text_index():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"], seen["body"] = str(request.url), json.loads(request.content)
+        return httpx.Response(200, json={"output": {"embeddings": [
+            {"text_index": 1, "embedding": [2.0]}, {"text_index": 0, "embedding": [1.0]}]}})
+
+    target = _embedding_target("DashScope Text Embeddings")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await embed_texts(target, ["a", "b"], client=client)
+    assert seen["url"] == "https://api.example.test/api/v1/services/embeddings/text-embedding/text-embedding"
+    assert seen["body"]["input"] == {"texts": ["a", "b"]} and result.vectors == [[1.0], [2.0]]
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_rejects_wrong_dimension_count_and_redacts_errors():
+    def wrong_dimension(request):
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 2.0, 3.0]}]})
+
+    def wrong_count(request):
+        return httpx.Response(200, json={"data": []})
+
+    def unauthorized(request):
+        return httpx.Response(401, json={"error": {"message": "bad key sk-secret"}})
+
+    for handler, message in ((wrong_dimension, "维度"), (wrong_count, "数量"), (unauthorized, "REDACTED")):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(HealthCheckFailure, match=message) as error:
+                await embed_texts(_embedding_target(), ["a"], expected_dimension=2, client=client)
+        assert "sk-secret" not in str(error.value)
+    with pytest.raises(HealthCheckFailure, match="不支持"):
+        await embed_texts(_embedding_target("Cohere Rerank"), ["a"])
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_retries_rate_limits_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(429, json={"error": {"message": "slow down"}})
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0]}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await embed_texts(_embedding_target(), ["a"], client=client, sleep=_no_sleep)
+    assert len(calls) == 3 and result.vectors == [[1.0]]
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(503))) as client:
+        with pytest.raises(HealthCheckFailure, match="HTTP 503"):
+            await embed_texts(_embedding_target(), ["a"], client=client, sleep=_no_sleep)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "response", "check"),
+    [
+        ("OpenAI Chat Completions", {"choices": [{"message": {"content": " 一张折线图 "}}]}, lambda b: b["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")),
+        ("OpenAI Responses", {"output": [{"content": [{"type": "output_text", "text": "一张折线图"}]}]}, lambda b: b["input"][0]["content"][1]["type"] == "input_image"),
+        ("Anthropic Messages", {"content": [{"type": "text", "text": "一张折线图"}]}, lambda b: b["messages"][0]["content"][0]["source"]["media_type"] == "image/png"),
+    ],
+)
+async def test_describe_image_builds_protocol_specific_payloads(protocol, response, check):
+    sent = {}
+
+    def handler(request):
+        sent["body"] = json.loads(request.content)
+        return httpx.Response(200, json=response)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        text = await describe_image(_embedding_target(protocol), b"\x89PNG", "image/png", client=client)
+    assert text == "一张折线图" and check(sent["body"])
+
+
+@pytest.mark.asyncio
+async def test_describe_image_rejects_empty_answers_and_unsupported_protocols():
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}))) as client:
+        with pytest.raises(HealthCheckFailure, match="没有返回描述"):
+            await describe_image(_embedding_target("OpenAI Chat Completions"), b"x", "image/png", client=client)
+    with pytest.raises(HealthCheckFailure, match="不支持"):
+        await describe_image(_embedding_target("OpenAI Embeddings"), b"x", "image/png")

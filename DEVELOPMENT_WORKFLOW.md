@@ -89,7 +89,7 @@
 
 ## 阶段 3：知识库与导入模块
 
-状态：进行中（后端先行，步骤 1-4/6 已完成（步骤 3 已含角色校验依赖，接口接入在步骤 6；步骤 4 的阿里云解析适配器已完成并通过模拟测试，layouts 字段格式待真实 Key 验证，视觉描述在步骤 5 接入））
+状态：进行中（后端先行，步骤 1-5/6 已完成（步骤 3 已含角色校验依赖，接口接入在步骤 6；步骤 4 的阿里云解析适配器已完成并通过模拟测试，layouts 字段格式待真实 Key 验证，视觉描述在步骤 5 接入））
 
 实施步骤：1 依赖、配置与 Compose；2 数据模型与迁移；3 上传、存储与角色校验；4 解析与切分；5 向量化与 Celery 任务；6 接口与前端接入。用户已确认：阿里云 Key 稍后提供，此前 PDF、Word、图片仅做模拟测试；Qdrant 本阶段只建稠密向量，稀疏向量留到阶段 4。
 
@@ -97,14 +97,18 @@
 - [x] 完成文件校验、SHA-256 去重和 S3 兼容对象存储
 - [ ] 完成阿里云解析、OCR 和视觉描述
 - [x] 完成标题、段落和表格感知切分
-- [ ] 完成 Celery 任务进度、取消、重试和恢复
-- [ ] 完成每库独立 embedding 与 Qdrant collection
+- [x] 完成 Celery 任务进度、取消、重试和恢复
+- [x] 完成每库独立 embedding 与 Qdrant collection
 - [ ] 完成分段编辑和局部重新向量化
-- [ ] 完成 embedding 模型变更后的整库重建
+- [x] 完成 embedding 模型变更后的整库重建
 - [ ] 使用全部约定文件类型完成测试
 - [ ] 阶段验收完成
 
 完成记录：进行中
+
+- 步骤 5 记录（2026-10-26）：新增 `embed_texts`（按协议分批、按 index 排序、维度校验、429/5xx 指数退避重试、错误脱敏）和 `describe_image`（OpenAI Chat、Responses、Anthropic 三种图片输入格式）；`VectorStore` 封装每库独立 collection、维度一致性校验和按文档/分段删除；`ingestion.py` 实现上传→解析→图片增强→切分→向量化流水线，支持阶段进度、取消（清理分段与向量）、部分失败、重试幂等（条件更新抢占任务）、分段局部重新向量化、整库重建（写入新 collection，全部成功才切换，失败保留旧索引并标记 `rebuild_failed`），以及 Beat 每 5 分钟恢复超过 20 分钟无进展的任务。
+- 步骤 5 测试：`uv run pytest -q` 89 项通过；使用真实 PostgreSQL、Redis、Qdrant、RustFS 与本地模拟 embedding 服务，经 Celery worker 完成 Markdown 导入端到端验证（文档就绪、2 个分段已索引、Qdrant 2 个点、清理后集合删除）。
+- 步骤 5 已修复问题：Celery 默认 prefork 进程池在 Python 3.15 下任务启动即报 `ValueError: not enough values to unpack`，worker 改用 `--pool=threads`；`qdrant-client` 1.20 与服务端 1.15.5 版本不兼容，固定为 1.15 系列；句子切分会吞掉英文句间空格和段落换行，改为零宽切分保留原文分隔符；Markdown 表格分隔行 `| - |` 未被识别。
 
 ## 阶段 4：自动路由、检索与在线对话
 
