@@ -35,10 +35,26 @@ import {
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  checkProvider,
+  createModel,
+  createProvider,
+  deleteProvider,
+  getModelDefaults,
+  getSession,
+  listModels,
+  listProviders,
+  updateModel,
+  updateModelDefaults,
+  updateProvider,
+  updateSessionRole,
+  type ModelDefaults,
+} from "./api-client";
+import {
   providerPresets,
   roleCopy,
   type DocumentItem,
   type KnowledgeBase,
+  type ModelInstance,
   type ModelProvider,
   type ProviderPreset,
   type Role,
@@ -46,6 +62,23 @@ import {
 
 type ViewKey = "overview" | "knowledge" | "chat" | "models" | "logs";
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+
+const capabilityModelTypes: Record<string, ModelInstance["modelType"]> = {
+  LLM: "llm",
+  Embedding: "embedding",
+  Rerank: "rerank",
+  Vision: "vision",
+};
+
+function supportedModelTypes(preset: ProviderPreset | undefined): ModelInstance["modelType"][] {
+  return preset?.capabilities.map((capability) => capabilityModelTypes[capability]).filter(Boolean) ?? ["llm", "embedding", "rerank", "vision"];
+}
+
+function defaultProtocolForType(modelType: ModelInstance["modelType"]) {
+  if (modelType === "embedding") return "OpenAI Embeddings";
+  if (modelType === "rerank") return "Cohere Rerank";
+  return "OpenAI Chat Completions";
+}
 
 const navigation: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: Role[] }> = [
   { key: "overview", label: "系统概览", icon: LayoutDashboard, roles: ["admin", "manager"] },
@@ -235,22 +268,33 @@ export function PrototypeApp() {
   const [roleReady, setRoleReady] = useState(false);
   const [rolePickerOpen, setRolePickerOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToastState] = useState<{ message: string; tone: "success" | "warning" | "error" } | null>(null);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [documentsByKnowledgeBase, setDocumentsByKnowledgeBase] = useState<Record<string, DocumentItem[]>>({});
   const [modelProviders, setModelProviders] = useState<ModelProvider[]>([]);
+  const setToast = (message: string) => setToastState({ message, tone: "success" });
+  const setWarningToast = (message: string) => setToastState({ message, tone: "warning" });
+  const setErrorToast = (message: string) => setToastState({ message, tone: "error" });
 
   const allowedNavigation = useMemo(() => navigation.filter((item) => item.roles.includes(role)), [role]);
   const selectedKb = searchParams.get("kb") ?? undefined;
 
   useEffect(() => {
     const stored = window.localStorage.getItem("rag-role") as Role | null;
-    if (stored && roleCopy[stored]) {
-      setRole(stored);
-    } else {
-      setRolePickerOpen(true);
-    }
-    setRoleReady(true);
+    if (stored && roleCopy[stored]) setRole(stored);
+    getSession()
+      .then((session) => {
+        if (stored && roleCopy[stored]) {
+          setRole(stored);
+          if (session.role !== stored) return updateSessionRole(stored);
+        } else {
+          setRole(session.role);
+          setRolePickerOpen(true);
+        }
+      })
+      .catch((error) => setErrorToast(error instanceof Error ? error.message : "匿名会话初始化失败"))
+      .finally(() => setRoleReady(true));
+    listProviders().then(setModelProviders).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -261,17 +305,22 @@ export function PrototypeApp() {
 
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 3200);
+    const timer = window.setTimeout(() => setToastState(null), 4200);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const chooseRole = (nextRole: Role) => {
+  const chooseRole = async (nextRole: Role) => {
     setRole(nextRole);
     window.localStorage.setItem("rag-role", nextRole);
     setRolePickerOpen(false);
     setMobileNav(false);
     router.push(nextRole === "user" ? "/chat" : "/overview");
-    setToast(`已切换为${roleCopy[nextRole].name}`);
+    try {
+      await updateSessionRole(nextRole);
+      setToast(`已切换为${roleCopy[nextRole].name}`);
+    } catch (error) {
+      setErrorToast(error instanceof Error ? error.message : "角色保存失败");
+    }
   };
 
   const navigate = (view: ViewKey) => {
@@ -342,13 +391,13 @@ export function PrototypeApp() {
           {activeView === "overview" ? <OverviewView navigate={navigate} knowledgeBaseCount={knowledgeBases.length} providerCount={modelProviders.length} /> : null}
           {activeView === "knowledge" ? <KnowledgeView selectedId={selectedKb} router={router} role={role} setToast={setToast} knowledgeBases={knowledgeBases} setKnowledgeBases={setKnowledgeBases} documentsByKnowledgeBase={documentsByKnowledgeBase} setDocumentsByKnowledgeBase={setDocumentsByKnowledgeBase} /> : null}
           {activeView === "chat" ? <ChatView navigate={navigate} role={role} hasKnowledgeBase={knowledgeBases.length > 0} readyForChat={Object.values(documentsByKnowledgeBase).some((items) => items.some((document) => document.status === "ready"))} /> : null}
-          {activeView === "models" ? <ModelsView setToast={setToast} providers={modelProviders} setProviders={setModelProviders} /> : null}
+          {activeView === "models" ? <ModelsView setToast={setToast} setWarningToast={setWarningToast} setErrorToast={setErrorToast} providers={modelProviders} setProviders={setModelProviders} /> : null}
           {activeView === "logs" ? <LogsView /> : null}
         </main>
       </div>
 
       <RolePicker open={rolePickerOpen} required={!roleReady || !windowSafeHasRole()} onOpenChange={setRolePickerOpen} onSelect={chooseRole} />
-      {toast ? <div className="toast" role="status"><CheckCircle2 size={17} aria-hidden="true" />{toast}</div> : null}
+      {toast ? <div className={cn("toast", toast.tone === "warning" && "toast-warning", toast.tone === "error" && "toast-error")} role="status">{toast.tone === "success" ? <CheckCircle2 size={17} aria-hidden="true" /> : <ShieldAlert size={17} aria-hidden="true" />}{toast.message}</div> : null}
     </div>
   );
 }
@@ -587,60 +636,187 @@ function ChatView({ navigate, role, hasKnowledgeBase, readyForChat }: { navigate
   );
 }
 
-function ModelsView({ setToast, providers, setProviders }: { setToast: (message: string) => void; providers: ModelProvider[]; setProviders: (providers: ModelProvider[]) => void }) {
+function ModelsView({ setToast, setWarningToast, setErrorToast, providers, setProviders }: { setToast: (message: string) => void; setWarningToast: (message: string) => void; setErrorToast: (message: string) => void; providers: ModelProvider[]; setProviders: (providers: ModelProvider[]) => void }) {
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<ModelProvider | null>(null);
+  const [models, setModels] = useState<ModelInstance[]>([]);
+  const [defaults, setDefaults] = useState<ModelDefaults>({ routing_embedding: null, routing_llm: null, default_rerank: null, vision: null });
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+  const [modelModalOpen, setModelModalOpen] = useState(false);
   const customPreset = providerPresets.find((preset) => preset.custom)!;
-  const saveProvider = (provider: ModelProvider) => {
-    setProviders([...providers.filter((item) => item.presetId !== provider.presetId), provider]);
+
+  const refresh = async () => {
+    const [nextProviders, nextModels, nextDefaults] = await Promise.all([listProviders(), listModels(), getModelDefaults()]);
+    setProviders(nextProviders);
+    setModels(nextModels);
+    setDefaults(nextDefaults);
   };
+
+  useEffect(() => {
+    refresh().catch((error) => setErrorToast(error instanceof Error ? error.message : "模型配置加载失败"));
+  }, []);
+
+  const openConfiguration = (preset: ProviderPreset, provider?: ModelProvider) => {
+    setSelectedPreset(preset);
+    setSelectedProvider(provider ?? null);
+  };
+
+  const runHealthCheck = async (provider: ModelProvider) => {
+    setCheckingId(provider.id);
+    try {
+      const result = await checkProvider(provider.id);
+      await refresh();
+      const message = `${result.status === "healthy" ? "连接检测通过" : "连接部分通过"}，耗时 ${Math.round(result.latency_ms)} ms：${result.message}`;
+      if (result.status === "healthy") setToast(message);
+      else setWarningToast(message);
+    } catch (error) {
+      await refresh().catch(() => undefined);
+      setErrorToast(error instanceof Error ? error.message : "连接检测失败");
+    } finally {
+      setCheckingId(null);
+    }
+  };
+
+  const changeDefault = async (key: keyof ModelDefaults, value: string) => {
+    try {
+      const next = await updateModelDefaults({ ...defaults, [key]: value || null });
+      setDefaults(next);
+      setToast("系统默认模型已更新");
+    } catch (error) {
+      setErrorToast(error instanceof Error ? error.message : "默认模型更新失败");
+    }
+  };
+
+  const statusCopy = (provider: ModelProvider | undefined, experimental?: boolean) => {
+    if (!provider) return experimental ? { tone: "warning", label: "实验性 · 未配置" } : { tone: "neutral", label: "未配置" };
+    if (provider.health === "healthy") return { tone: "success", label: "正常" };
+    if (provider.health === "degraded") return { tone: "warning", label: "部分通过" };
+    if (provider.health === "error") return { tone: "error", label: "异常" };
+    return { tone: "progress", label: "待检测" };
+  };
+
+  const defaultFields: Array<{ key: keyof ModelDefaults; label: string; type: ModelInstance["modelType"] }> = [
+    { key: "routing_embedding", label: "路由 Embedding", type: "embedding" },
+    { key: "routing_llm", label: "路由 LLM", type: "llm" },
+    { key: "default_rerank", label: "默认 Rerank", type: "rerank" },
+    { key: "vision", label: "视觉模型", type: "vision" },
+  ];
+
   return (
     <div className="content-stack">
-      <div className="toolbar"><div className="toolbar-note"><KeyRound size={17} /><span>预设仅提供配置入口，不代表供应商已连接。</span></div><Button variant="primary" icon={Plus} onClick={() => setSelectedPreset(customPreset)}>添加自定义供应商</Button></div>
+      <div className="toolbar"><div className="toolbar-note"><KeyRound size={17} /><span>密钥由后端加密保存，页面与接口只返回掩码。</span></div><Button variant="primary" icon={Plus} onClick={() => openConfiguration(customPreset)}>添加自定义供应商</Button></div>
       <section className="provider-section" aria-labelledby="provider-presets-title">
-        <div className="section-heading"><div><h2 id="provider-presets-title">预设供应商</h2><p>选择供应商后填写密钥和服务地址；未配置项不会参与模型调用。</p></div><span>{providers.length} 个已配置</span></div>
+        <div className="section-heading"><div><h2 id="provider-presets-title">预设供应商</h2><p>配置供应商和首个模型后，可执行真实连接检测。</p></div><span>{providers.length} 个已配置</span></div>
         <div className="provider-grid">
           {providerPresets.map((preset) => {
             const configured = providers.find((provider) => provider.presetId === preset.id);
+            const status = statusCopy(configured, preset.experimental);
             return (
               <article className="provider-card provider-preset-card" key={preset.id}>
                 <div className="provider-top">
                   <div className="provider-logo">{preset.name.slice(0, 2)}</div>
-                  <div><h2>{preset.name}</h2><p>{preset.protocol}</p></div>
-                  <StatusBadge status={configured ? "success" : preset.experimental ? "warning" : "neutral"}>{configured ? "已配置" : preset.experimental ? "实验性 · 未配置" : "未配置"}</StatusBadge>
+                  <div><h2>{preset.name}</h2><p>{configured?.defaultProtocol ?? preset.protocol}</p></div>
+                  <StatusBadge status={status.tone}>{status.label}</StatusBadge>
                 </div>
                 <p className="provider-description">{preset.description}</p>
                 <div className="provider-capability">{preset.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>
-                <div className="provider-actions"><Button variant={configured ? "secondary" : "primary"} onClick={() => setSelectedPreset(preset)}>{configured ? "重新配置" : preset.custom ? "添加" : "配置"}</Button>{configured ? <Button icon={Activity} variant="ghost" onClick={() => setToast("后端接入后执行真实连接检测")}>检测连接</Button> : null}</div>
+                {configured ? <dl className="provider-stats"><div><dt>模型实例</dt><dd>{configured.modelCount}</dd></div><div><dt>最近延迟</dt><dd>{configured.lastLatencyMs === null ? "未检测" : `${Math.round(configured.lastLatencyMs)} ms`}</dd></div></dl> : null}
+                {configured?.lastError ? <div className="provider-warning"><ShieldAlert size={15} aria-hidden="true" /><span>{configured.lastError}</span></div> : null}
+                <div className="provider-actions"><Button variant={configured ? "secondary" : "primary"} onClick={() => openConfiguration(preset, configured)}>{configured ? "重新配置" : preset.custom ? "添加" : "配置"}</Button>{configured ? <Button icon={Activity} variant="ghost" disabled={checkingId === configured.id || configured.modelCount === 0} onClick={() => runHealthCheck(configured)}>{checkingId === configured.id ? "检测中…" : configured.modelCount ? "检测连接" : "请先配置模型"}</Button> : null}</div>
               </article>
             );
           })}
         </div>
       </section>
-      <section className="panel defaults-panel"><div className="panel-heading compact"><div><h2>系统默认模型</h2><p>知识库仍可绑定自己的 Embedding 模型</p></div></div><div className="defaults-grid">{["路由 Embedding", "路由 LLM", "默认 Rerank", "视觉模型"].map((label) => <label key={label}><span>{label}</span><select disabled value=""><option value="">未配置</option></select></label>)}</div></section>
-      <AddProviderModal preset={selectedPreset} onOpenChange={(open) => !open && setSelectedPreset(null)} setToast={setToast} onAdd={saveProvider} />
+
+      <section className="panel model-instances-panel"><div className="panel-heading compact"><div><h2>模型实例</h2><p>模型 ID、能力类型和协议用于真实检测与后续 RAG 调用</p></div><Button icon={Plus} onClick={() => setModelModalOpen(true)} disabled={!providers.length}>添加模型</Button></div>{models.length ? <div className="model-instance-list">{models.map((model) => <div className="model-instance-row" key={model.id}><div><strong>{model.name}</strong><span>{model.modelId}</span></div><span className="model-type-tag">{model.modelType}</span><span>{providers.find((provider) => provider.id === model.providerId)?.name ?? "未知供应商"}</span><span>{model.protocol}</span></div>)}</div> : <div className="inline-empty">配置供应商时可同时创建首个模型实例。</div>}</section>
+
+      <section className="panel defaults-panel"><div className="panel-heading compact"><div><h2>系统默认模型</h2><p>知识库仍可绑定自己的 Embedding 模型</p></div></div><div className="defaults-grid">{defaultFields.map((field) => <label key={field.key}><span>{field.label}</span><select value={defaults[field.key] ?? ""} onChange={(event) => changeDefault(field.key, event.target.value)}><option value="">未配置</option>{models.filter((model) => model.modelType === field.type && model.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>)}</div></section>
+
+      <AddProviderModal preset={selectedPreset} configuredProvider={selectedProvider} configuredModel={selectedProvider ? models.find((model) => model.providerId === selectedProvider.id) ?? null : null} onOpenChange={(open) => { if (!open) { setSelectedPreset(null); setSelectedProvider(null); } }} setToast={setToast} setErrorToast={setErrorToast} onSaved={refresh} />
+      <AddModelModal open={modelModalOpen} providers={providers} onOpenChange={setModelModalOpen} setToast={setToast} setErrorToast={setErrorToast} onSaved={refresh} />
     </div>
   );
 }
 
-function AddProviderModal({ preset, onOpenChange, setToast, onAdd }: { preset: ProviderPreset | null; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; onAdd: (provider: ModelProvider) => void }) {
+function AddProviderModal({ preset, configuredProvider, configuredModel, onOpenChange, setToast, setErrorToast, onSaved }: { preset: ProviderPreset | null; configuredProvider: ModelProvider | null; configuredModel: ModelInstance | null; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("OpenAI Chat Completions");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [modelType, setModelType] = useState<ModelInstance["modelType"]>("llm");
+  const [vectorDimension, setVectorDimension] = useState("");
+  const [contextLength, setContextLength] = useState("");
+  const [saving, setSaving] = useState(false);
+  const allowedModelTypes = supportedModelTypes(preset ?? undefined);
+
   useEffect(() => {
     if (!preset) return;
-    setName(preset.custom ? "" : preset.name);
-    setProtocol(preset.protocolValue);
-    setBaseUrl(preset.baseUrl ?? "");
+    setName(configuredProvider?.name ?? (preset.custom ? "" : preset.name));
+    setProtocol(configuredModel?.protocol ?? preset.protocolValue);
+    setBaseUrl(configuredProvider?.baseUrl ?? preset.baseUrl ?? "");
     setApiKey("");
-  }, [preset]);
-  const submit = () => {
-    if (!preset || !name.trim() || !baseUrl.trim() || !apiKey.trim()) return;
-    onAdd({ id: crypto.randomUUID(), presetId: preset.id, name: name.trim(), protocol, models: 0, health: "pending", latency: "未检测", usage: preset.capabilities.join(" · ") });
-    onOpenChange(false);
-    setToast(`${name.trim()} 已保存到当前原型会话`);
+    setModelId(configuredModel?.modelId ?? "");
+    setModelType(configuredModel?.modelType ?? (preset.experimental ? "llm" : "llm"));
+    setVectorDimension(configuredModel?.vectorDimension ? String(configuredModel.vectorDimension) : "");
+    setContextLength(configuredModel?.contextLength ? String(configuredModel.contextLength) : "");
+  }, [preset, configuredProvider, configuredModel]);
+
+  const submit = async () => {
+    if (!preset || !name.trim() || !baseUrl.trim() || (!configuredProvider && !apiKey.trim()) || !modelId.trim()) return;
+    if (modelType === "embedding" && !Number(vectorDimension)) return;
+    setSaving(true);
+    let createdProviderId: string | null = null;
+    try {
+      const providerInput = { presetId: preset.id, name: name.trim(), baseUrl: baseUrl.trim(), apiKey: apiKey.trim(), defaultProtocol: protocol };
+      const provider = configuredProvider ? await updateProvider(configuredProvider.id, providerInput) : await createProvider(providerInput);
+      if (!configuredProvider) createdProviderId = provider.id;
+      const modelInput = { providerId: provider.id, name: modelId.trim(), modelId: modelId.trim(), modelType, protocol, contextLength: Number(contextLength) || null, vectorDimension: modelType === "embedding" ? Number(vectorDimension) : null, timeoutSeconds: 30, enabled: true };
+      if (configuredModel) await updateModel(configuredModel.id, modelInput);
+      else await createModel(modelInput);
+      await onSaved();
+      onOpenChange(false);
+      setToast(`${name.trim()} 与模型 ${modelId.trim()} 已安全保存`);
+    } catch (error) {
+      if (createdProviderId) await deleteProvider(createdProviderId).catch(() => undefined);
+      await onSaved().catch(() => undefined);
+      setErrorToast(error instanceof Error ? error.message : "供应商配置保存失败");
+    } finally {
+      setSaving(false);
+    }
   };
-  return <Modal open={Boolean(preset)} onOpenChange={onOpenChange} title={preset?.custom ? "添加自定义供应商" : `配置${preset?.name ?? "供应商"}`} description="当前为前端原型，输入内容只保留在本次浏览器会话中。"><div className="modal-form"><label><span>供应商名称</span><input autoFocus value={name} readOnly={!preset?.custom} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label><label><span>协议</span><select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label><label><span>Base URL</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="输入 API 地址" /></label><label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入 API Key" autoComplete="off" /></label>{preset?.experimental ? <div className="provider-warning"><ShieldAlert size={15} aria-hidden="true" /><span>Kimi Code 为实验性 LLM 渠道，需要单独验证普通问答、流式输出和 usage 返回。</span></div> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)}>取消</Button><Button variant="primary" onClick={submit} disabled={!name.trim() || !baseUrl.trim() || !apiKey.trim()}>保存配置</Button></div></Modal>;
+
+  const canSave = Boolean(name.trim() && baseUrl.trim() && (configuredProvider || apiKey.trim()) && modelId.trim() && (modelType !== "embedding" || Number(vectorDimension)));
+  return <Modal open={Boolean(preset)} onOpenChange={onOpenChange} title={configuredProvider ? `重新配置${configuredProvider.name}` : preset?.custom ? "添加自定义供应商" : `配置${preset?.name ?? "供应商"}`} description="密钥提交到后端后使用主密钥加密，接口只返回掩码。"><div className="modal-form"><label><span>供应商名称</span><input autoFocus value={name} readOnly={!preset?.custom} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label><label><span>Base URL</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" /></label><label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configuredProvider ? `留空则继续使用 ${configuredProvider.apiKeyMasked}` : "输入 API Key"} autoComplete="new-password" /></label><div className="form-divider"><span>首个模型</span></div><label><span>模型 ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="填写供应商公布的模型 ID" /></label><div className="form-row"><label><span>模型类型</span><select value={modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const nextType = event.target.value as ModelInstance["modelType"]; setModelType(nextType); setProtocol(defaultProtocolForType(nextType)); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label><span>协议</span><select value={protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div><div className="form-row"><label><span>上下文长度（可选）</span><input type="number" min="1" value={contextLength} onChange={(event) => setContextLength(event.target.value)} placeholder="例如 32768" /></label>{modelType === "embedding" ? <label><span>向量维度</span><input type="number" min="1" value={vectorDimension} onChange={(event) => setVectorDimension(event.target.value)} placeholder="必填" /></label> : <label><span>向量维度</span><input disabled value="不适用" /></label>}</div>{preset?.experimental ? <div className="provider-warning"><ShieldAlert size={15} aria-hidden="true" /><span>Kimi Code 会检测普通问答、流式输出和 usage 返回；不用于向量或重排。</span></div> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={!canSave || saving}>{saving ? "保存中…" : "保存配置"}</Button></div></Modal>;
+}
+
+function AddModelModal({ open, providers, onOpenChange, setToast, setErrorToast, onSaved }: { open: boolean; providers: ModelProvider[]; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
+  const [providerId, setProviderId] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [modelType, setModelType] = useState<ModelInstance["modelType"]>("llm");
+  const [protocol, setProtocol] = useState("OpenAI Chat Completions");
+  const [dimension, setDimension] = useState("");
+  const [saving, setSaving] = useState(false);
+  const selectedProvider = providers.find((provider) => provider.id === providerId);
+  const selectedPreset = providerPresets.find((preset) => preset.id === selectedProvider?.presetId);
+  const allowedModelTypes = supportedModelTypes(selectedPreset);
+  useEffect(() => { if (open) { const provider = providers[0]; const preset = providerPresets.find((item) => item.id === provider?.presetId); const initialType = supportedModelTypes(preset)[0] ?? "llm"; setProviderId(provider?.id ?? ""); setModelId(""); setModelType(initialType); setProtocol(provider?.defaultProtocol ?? defaultProtocolForType(initialType)); setDimension(""); } }, [open, providers]);
+  const submit = async () => {
+    if (!providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))) return;
+    setSaving(true);
+    try {
+      await createModel({ providerId, name: modelId.trim(), modelId: modelId.trim(), modelType, protocol, contextLength: null, vectorDimension: modelType === "embedding" ? Number(dimension) : null, timeoutSeconds: 30, enabled: true });
+      await onSaved();
+      onOpenChange(false);
+      setToast(`模型 ${modelId.trim()} 已添加`);
+    } catch (error) {
+      setErrorToast(error instanceof Error ? error.message : "模型添加失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <Modal open={open} onOpenChange={onOpenChange} title="添加模型实例" description="同一供应商可以配置多个 LLM、Embedding、Rerank 或视觉模型。"><div className="modal-form"><label><span>供应商</span><select value={providerId} onChange={(event) => { const provider = providers.find((item) => item.id === event.target.value); const preset = providerPresets.find((item) => item.id === provider?.presetId); const initialType = supportedModelTypes(preset)[0] ?? "llm"; setProviderId(event.target.value); setModelType(initialType); setProtocol(provider?.defaultProtocol ?? defaultProtocolForType(initialType)); }}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>模型 ID</span><input autoFocus value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="填写供应商公布的模型 ID" /></label><div className="form-row"><label><span>模型类型</span><select value={modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const nextType = event.target.value as ModelInstance["modelType"]; setModelType(nextType); setProtocol(defaultProtocolForType(nextType)); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label><span>协议</span><select value={protocol} disabled={selectedPreset?.experimental} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div>{modelType === "embedding" ? <label><span>向量维度</span><input type="number" min="1" value={dimension} onChange={(event) => setDimension(event.target.value)} /></label> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={saving || !providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))}>{saving ? "添加中…" : "添加模型"}</Button></div></Modal>;
 }
 
 function LogsView() {

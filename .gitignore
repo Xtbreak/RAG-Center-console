@@ -1,15 +1,23 @@
 # Python-generated files
+.env
+.env.local
+.venv/
+.pytest_cache/
 __pycache__/
-*.py[oc]
+*.py[cod]
 build/
 dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+# Local runtime data
+data/
+artifacts/
 
 # Node / Next.js
 node_modules
 .next/
 *.tsbuildinfo
+apps/web/.next/
+apps/web/node_modules
+apps/web/*.tsbuildinfo

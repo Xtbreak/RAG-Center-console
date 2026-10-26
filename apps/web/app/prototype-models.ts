@@ -23,13 +23,29 @@ export type DocumentItem = {
 
 export type ModelProvider = {
   id: string;
-  presetId?: string;
+  presetId: string;
   name: string;
+  baseUrl: string;
+  apiKeyMasked: string;
+  defaultProtocol: string;
+  modelCount: number;
+  health: "untested" | "healthy" | "degraded" | "error";
+  lastLatencyMs: number | null;
+  lastError: string | null;
+  lastCheckedAt: string | null;
+};
+
+export type ModelInstance = {
+  id: string;
+  providerId: string;
+  name: string;
+  modelId: string;
+  modelType: "llm" | "embedding" | "rerank" | "vision";
   protocol: string;
-  models: number;
-  health: "healthy" | "experimental" | "error" | "pending";
-  latency: string;
-  usage: string;
+  contextLength: number | null;
+  vectorDimension: number | null;
+  timeoutSeconds: number;
+  enabled: boolean;
 };
 
 export type ProviderPreset = {
@@ -52,6 +68,7 @@ export const providerPresets: ProviderPreset[] = [
     protocolValue: "OpenAI Chat Completions",
     capabilities: ["LLM", "Vision"],
     description: "聚合多家模型服务，通过统一接口调用。",
+    baseUrl: "https://openrouter.ai/api/v1",
   },
   {
     id: "aihubmix",
@@ -60,6 +77,7 @@ export const providerPresets: ProviderPreset[] = [
     protocolValue: "OpenAI Chat Completions",
     capabilities: ["LLM", "Embedding", "Rerank", "Vision"],
     description: "兼容多类模型能力的聚合服务。",
+    baseUrl: "https://aihubmix.com/v1",
   },
   {
     id: "dashscope",
@@ -68,6 +86,7 @@ export const providerPresets: ProviderPreset[] = [
     protocolValue: "OpenAI Chat Completions",
     capabilities: ["LLM", "Embedding", "Rerank", "Vision"],
     description: "接入通义系列生成、向量、重排和视觉模型。",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   },
   {
     id: "deepseek",
@@ -76,6 +95,7 @@ export const providerPresets: ProviderPreset[] = [
     protocolValue: "OpenAI Chat Completions",
     capabilities: ["LLM"],
     description: "接入 DeepSeek 对话与推理模型。",
+    baseUrl: "https://api.deepseek.com",
   },
   {
     id: "kimi-code",
