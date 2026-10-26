@@ -75,6 +75,7 @@
 ### 5.2 配置与安全
 
 - 模型配置包括模型 ID、Base URL、上下文长度、向量维度、能力、超时和默认用途。
+- 填写 Base URL、API Key 和协议后，从供应商 `/models` 接口实时获取模型；用户选择模型并指定 LLM、Embedding、Rerank 或 Vision 类型后保存。获取失败时提供重试和手动填写模型 ID，不使用虚构模型列表。
 - 所有模型实例提供真实健康检测。
 - 密钥使用环境主密钥加密保存，接口只返回掩码。
 - 日志禁止记录 API Key、Authorization 请求头或其他鉴权值。
@@ -121,7 +122,7 @@ Kimi Code 使用中国区 `https://api.kimi.com/coding/v1`，标记为“实验�
 ## 8. 主要接口
 
 - `/api/v1/session`：角色选择和匿名会话。
-- `/api/v1/providers`、`/api/v1/models`：供应商、模型和健康检测。
+- `/api/v1/providers`、`/api/v1/providers/discover-models`、`/api/v1/models`：供应商、模型自动获取、模型实例和健康检测。
 - `/api/v1/knowledge-bases`：知识库、配置、分段和重建。
 - `/api/v1/documents`、`/api/v1/ingestion-jobs`：上传、进度、取消和重试。
 - `/api/v1/retrieval/test`：自动选库和检索调试。
@@ -167,3 +168,4 @@ Kimi Code 使用中国区 `https://api.kimi.com/coding/v1`，标记为“实验�
 | 日期 | 变更 | 确认状态 |
 | --- | --- | --- |
 | 2026-10-26 | 建立企业知识库中台 1.0 开发基线 | 已确认 |
+| 2026-10-26 | 供应商配置改为先实时获取模型，再选择模型类型并保存；失败时允许重试或手动填写 | 用户明确要求 |

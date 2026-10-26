@@ -68,6 +68,7 @@
 - [ ] 初始化 PostgreSQL、Qdrant、Redis 和 MinIO
 - [x] 完成数据库迁移和匿名角色会话
 - [x] 完成供应商、模型、默认用途、密钥加密和脱敏
+- [x] 完成供应商模型列表自动获取、批量选择和手动恢复入口
 - [x] 实现 OpenAI Chat、Responses、Embeddings 协议适配
 - [x] 实现 Anthropic Messages 和 Cohere 兼容 Rerank
 - [x] 实现 OpenRouter、AIHubMix、通义、DeepSeek、Kimi Code 和自定义供应商
@@ -78,11 +79,11 @@
 阶段记录（进行中）：
 
 - 实现日期：2026-10-26
-- 实现摘要：已建立 Compose、环境变量模板、FastAPI API、SQLAlchemy 数据模型、Alembic 首次迁移、匿名角色会话、供应商与模型管理、系统默认模型、Fernet 密钥加密和真实协议健康检测。模型页已改为调用后端，健康状态、模型数量、延迟和错误均来自实际接口。
-- 测试命令与结果：`uv run pytest -q` 通过，13 项测试覆盖会话、密钥、模型校验、五类通用协议和 Kimi Code 普通请求、流式输出及 usage；Alembic 在隔离数据库升级成功；`npm run typecheck` 与 `npm run build` 通过；Next.js 到 FastAPI 的 `/api/v1/session` 同源代理返回 HTTP 200；Compose YAML 语法检查通过。
-- 已修复问题：移除“已配置即成功”的误导状态；连接检测失败现在保存脱敏错误并显示异常状态；API Key 不再保存在浏览器会话，后端仅返回掩码；补充供应商官方 Base URL 预填。
-- 未解决风险：当前机器未安装 Docker，尚未启动和验证 PostgreSQL、Qdrant、Redis、MinIO；尚未提供任何真实供应商 Key，因此外部服务连通性、实际模型 ID、计费 usage 和 Kimi Code 真实流式响应仍待验证。
-- 对应提交哈希：阶段 2 第一批实现 `6f933a5`。
+- 实现摘要：已建立 Compose、环境变量模板、FastAPI API、SQLAlchemy 数据模型、Alembic 首次迁移、匿名角色会话、供应商与模型管理、系统默认模型、Fernet 密钥加密和真实协议健康检测。模型页已改为调用后端，健康状态、模型数量、延迟和错误均来自实际接口。供应商配置现采用两步流程：填写连接信息后实时请求 `/models`，再搜索、批量选择模型并指定能力类型；Embedding 要求填写向量维度。已保存供应商可复用后端加密密钥，获取失败可重试或手动填写模型 ID，未勾选的旧模型不会被隐式删除。
+- 测试命令与结果：`uv run pytest -q` 通过，18 项测试覆盖会话、密钥、模型校验、五类通用协议、Kimi Code 普通请求、流式输出及 usage、OpenAI 与 Anthropic 模型列表、鉴权头、去重排序、密钥脱敏以及已保存密钥复用；Alembic 在隔离数据库升级成功；`npm run typecheck` 与 `npm run build` 通过；Next.js 到 FastAPI 的同源代理返回 HTTP 200；本地模拟供应商端到端请求返回真实解析后的模型列表，测试前后供应商数据一致；Compose YAML 语法检查通过；`git diff --check` 通过。
+- 已修复问题：移除“已配置即成功”的误导状态；连接检测失败现在保存脱敏错误并显示异常状态；API Key 不再保存在浏览器会话，后端仅返回掩码；补充供应商官方 Base URL 预填；移除供应商配置时强制手填首个模型 ID 的步骤，增加加载状态、内联错误、重试、搜索、批量选择和手动恢复入口。
+- 未解决风险：当前机器未安装 Docker，尚未启动和验证 PostgreSQL、Qdrant、Redis、MinIO；当前仅已配置供应商具有连接检测记录，其他供应商的真实模型列表格式、限流和错误响应仍需在提供相应 Key 后验证；本次环境无法启用浏览器自动化，新增弹窗的最终视觉手工验收仍待完成。
+- 对应提交哈希：阶段 2 第一批实现 `6f933a5`；自动获取模型 `e8eab83`。
 
 ## 阶段 3：知识库与导入模块
 
