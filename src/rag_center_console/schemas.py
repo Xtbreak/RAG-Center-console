@@ -150,3 +150,93 @@ class ModelDefaultsUpdate(BaseModel):
 
 class ModelDefaultsRead(ModelDefaultsUpdate):
     pass
+
+
+class KnowledgeBaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    embedding_model_id: str
+    chunk_size: int = Field(default=800, ge=100, le=4000)
+    chunk_overlap: int = Field(default=120, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def overlap_smaller_than_size(self):
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("分段重叠必须小于分段长度")
+        return self
+
+
+class KnowledgeBaseUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    embedding_model_id: str | None = None
+    chunk_size: int | None = Field(default=None, ge=100, le=4000)
+    chunk_overlap: int | None = Field(default=None, ge=0, le=1000)
+
+
+class KnowledgeBaseRead(BaseModel):
+    id: str
+    name: str
+    description: str
+    embedding_model_id: str
+    embedding_model_name: str
+    vector_dimension: int
+    chunk_size: int
+    chunk_overlap: int
+    status: str
+    document_count: int
+    ready_document_count: int
+    chunk_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentRead(BaseModel):
+    id: str
+    knowledge_base_id: str
+    filename: str
+    extension: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+    status: str
+    error_message: str | None
+    parse_strategy: str
+    enhance_images: bool
+    chunk_count: int
+    job_id: str | None
+    job_status: str | None
+    job_stage: str | None
+    job_progress: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class DuplicateDocument(BaseModel):
+    id: str
+    filename: str
+    created_at: datetime
+
+
+class ChunkRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    document_id: str
+    position: int
+    kind: str
+    content: str
+    token_count: int
+    location: dict
+    vector_status: str
+    edited: bool
+    updated_at: datetime
+
+
+class ChunkPage(BaseModel):
+    items: list[ChunkRead]
+    total: int
+
+
+class ChunkUpdate(BaseModel):
+    content: str = Field(min_length=1, max_length=20000)

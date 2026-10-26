@@ -7,6 +7,7 @@ from . import models  # noqa: F401
 from .api import router
 from .config import get_settings
 from .database import Base, engine
+from .knowledge_api import router as knowledge_router
 
 
 settings = get_settings()
@@ -28,6 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router, prefix=settings.api_prefix)
+app.include_router(knowledge_router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .adapters import DiscoveryTarget, HealthCheckFailure, discover_models
 from .auth import SESSION_COOKIE
 from .database import get_db
-from .models import AnonymousSession, ModelDefault, ModelDefinition, Provider, Role
+from .models import AnonymousSession, KnowledgeBase, ModelDefault, ModelDefinition, Provider, Role
 from .schemas import (
     DiscoveredModel,
     HealthCheckRead,
@@ -200,6 +200,14 @@ def delete_provider(provider_id: str, db: Session = Depends(get_db)) -> Response
     provider = db.get(Provider, provider_id)
     if provider is None:
         raise HTTPException(status_code=404, detail="供应商不存在")
+    in_use = db.scalar(
+        select(KnowledgeBase.name)
+        .join(ModelDefinition, ModelDefinition.id == KnowledgeBase.embedding_model_id)
+        .where(ModelDefinition.provider_id == provider.id)
+        .limit(1)
+    )
+    if in_use:
+        raise HTTPException(status_code=409, detail=f"知识库“{in_use}”正在使用该供应商的模型，请先更换其 Embedding 模型")
     db.delete(provider)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -274,6 +282,9 @@ def delete_model(model_id: str, db: Session = Depends(get_db)) -> Response:
     model = db.get(ModelDefinition, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
+    in_use = db.scalar(select(KnowledgeBase.name).where(KnowledgeBase.embedding_model_id == model.id).limit(1))
+    if in_use:
+        raise HTTPException(status_code=409, detail=f"知识库“{in_use}”正在使用该模型，请先更换其 Embedding 模型")
     db.delete(model)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
