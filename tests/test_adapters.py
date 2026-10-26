@@ -3,7 +3,13 @@ import json
 import httpx
 import pytest
 
-from rag_center_console.adapters import HealthCheckFailure, ProbeTarget, probe_model
+from rag_center_console.adapters import (
+    DiscoveryTarget,
+    HealthCheckFailure,
+    ProbeTarget,
+    discover_models,
+    probe_model,
+)
 from rag_center_console.models import ProviderHealth
 
 
@@ -83,4 +89,60 @@ async def test_provider_error_does_not_echo_api_key():
 
     assert "top-secret" not in str(exc_info.value)
     assert "invalid credentials" in str(exc_info.value)
+    assert "[REDACTED]" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_discovers_openai_data_models_with_deduplication_and_sorting():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        assert request.headers["authorization"] == "Bearer secret-key"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "z-model", "name": "Z model"},
+                    {"id": "a-model", "display_name": "A model"},
+                    {"id": "z-model", "name": "Duplicate"},
+                ]
+            },
+        )
+
+    target = DiscoveryTarget("https://provider.test/v1", "secret-key", "OpenAI Chat Completions")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert [(model.id, model.name) for model in result.models] == [
+        ("a-model", "A model"),
+        ("z-model", "Z model"),
+    ]
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_discovers_models_array_with_anthropic_headers():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "anthropic-secret"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json={"models": ["model-b", {"id": "model-a"}]})
+
+    target = DiscoveryTarget("https://provider.test/v1", "anthropic-secret", "Anthropic Messages")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert [model.id for model in result.models] == ["model-a", "model-b"]
+
+
+@pytest.mark.asyncio
+async def test_model_discovery_error_does_not_echo_api_key():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "bad key discovery-secret"}})
+
+    target = DiscoveryTarget("https://provider.test/v1", "discovery-secret", "OpenAI Responses")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(HealthCheckFailure) as exc_info:
+            await discover_models(target, client)
+
+    assert "discovery-secret" not in str(exc_info.value)
     assert "[REDACTED]" in str(exc_info.value)

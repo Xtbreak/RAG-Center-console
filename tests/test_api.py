@@ -1,3 +1,7 @@
+from rag_center_console.adapters import DiscoveryResult, DiscoveryTarget, ProbeResult, RemoteModel
+from rag_center_console.models import ProviderHealth
+
+
 def test_anonymous_session_role_persists_in_cookie(client):
     first = client.get("/api/v1/session")
     assert first.status_code == 200
@@ -73,11 +77,6 @@ def test_embedding_model_requires_vector_dimension(client):
 def test_model_defaults_reject_unknown_model(client):
     response = client.put("/api/v1/model-defaults", json={"routing_llm": "missing"})
     assert response.status_code == 404
-from rag_center_console.adapters import ProbeResult
-from rag_center_console.models import ProviderHealth
-
-
-
 
 def test_health_check_endpoint_updates_provider_with_real_probe_result(client, monkeypatch):
     provider = client.post(
@@ -118,3 +117,64 @@ def test_health_check_endpoint_updates_provider_with_real_probe_result(client, m
     refreshed = client.get("/api/v1/providers").json()[0]
     assert refreshed["health"] == "healthy"
     assert refreshed["last_latency_ms"] == 42.5
+
+
+def test_new_provider_can_discover_models_before_saving(client, monkeypatch):
+    captured: dict[str, DiscoveryTarget] = {}
+
+    async def successful_discovery(target: DiscoveryTarget):
+        captured["target"] = target
+        return DiscoveryResult(models=[RemoteModel(id="remote-model", name="Remote model")], truncated=False)
+
+    monkeypatch.setattr("rag_center_console.api.discover_models", successful_discovery)
+    response = client.post(
+        "/api/v1/providers/discover-models",
+        json={
+            "preset_id": "custom",
+            "base_url": "https://provider.test/v1",
+            "api_key": "direct-secret",
+            "protocol": "OpenAI Chat Completions",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "models": [{"id": "remote-model", "name": "Remote model", "model_type": None}],
+        "truncated": False,
+    }
+    assert captured["target"].api_key == "direct-secret"
+    assert client.get("/api/v1/providers").json() == []
+
+
+def test_saved_provider_discovery_reuses_encrypted_key(client, monkeypatch):
+    provider = client.post(
+        "/api/v1/providers",
+        json={
+            "preset_id": "deepseek",
+            "name": "DeepSeek",
+            "base_url": "https://old-provider.test/v1",
+            "api_key": "stored-secret",
+            "default_protocol": "OpenAI Chat Completions",
+        },
+    ).json()
+    captured: dict[str, DiscoveryTarget] = {}
+
+    async def successful_discovery(target: DiscoveryTarget):
+        captured["target"] = target
+        return DiscoveryResult(models=[], truncated=False)
+
+    monkeypatch.setattr("rag_center_console.api.discover_models", successful_discovery)
+    response = client.post(
+        "/api/v1/providers/discover-models",
+        json={
+            "provider_id": provider["id"],
+            "base_url": "https://new-provider.test/v1",
+            "protocol": "OpenAI Responses",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["target"].api_key == "stored-secret"
+    assert captured["target"].base_url == "https://new-provider.test/v1"
+    assert captured["target"].protocol == "OpenAI Responses"
+    assert "stored-secret" not in response.text

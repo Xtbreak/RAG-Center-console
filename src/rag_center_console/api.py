@@ -5,12 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .adapters import HealthCheckFailure
+from .adapters import DiscoveryTarget, HealthCheckFailure, discover_models
 from .database import get_db
 from .models import AnonymousSession, ModelDefault, ModelDefinition, Provider, Role
 from .schemas import (
+    DiscoveredModel,
     HealthCheckRead,
     ModelCreate,
+    ModelDiscoveryRequest,
+    ModelDiscoveryResponse,
     ModelDefaultsRead,
     ModelDefaultsUpdate,
     ModelRead,
@@ -117,6 +120,44 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> P
     db.commit()
     db.refresh(provider)
     return _provider_read(provider)
+
+
+@router.post("/providers/discover-models", response_model=ModelDiscoveryResponse)
+async def discover_provider_models(
+    payload: ModelDiscoveryRequest,
+    db: Session = Depends(get_db),
+) -> ModelDiscoveryResponse:
+    provider = db.get(Provider, payload.provider_id) if payload.provider_id else None
+    if payload.provider_id and provider is None:
+        raise HTTPException(status_code=404, detail="供应商不存在")
+
+    supplied_api_key = payload.api_key.get_secret_value().strip() if payload.api_key else ""
+    if supplied_api_key:
+        api_key = supplied_api_key
+    elif provider is not None:
+        try:
+            api_key = get_secret_box().decrypt(provider.api_key_encrypted)
+        except SecretConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=422, detail="请填写 API Key")
+
+    base_url = str(payload.base_url).rstrip("/") if payload.base_url else provider.base_url
+    protocol = payload.protocol or provider.default_protocol
+    try:
+        result = await discover_models(
+            DiscoveryTarget(
+                base_url=base_url,
+                api_key=api_key,
+                protocol=protocol,
+            )
+        )
+    except HealthCheckFailure as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return ModelDiscoveryResponse(
+        models=[DiscoveredModel(id=model.id, name=model.name, model_type=None) for model in result.models],
+        truncated=result.truncated,
+    )
 
 
 @router.patch("/providers/{provider_id}", response_model=ProviderRead)

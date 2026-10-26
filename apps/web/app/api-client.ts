@@ -65,6 +65,25 @@ export type HealthCheckResult = {
   message: string;
 };
 
+export type DiscoveredModel = {
+  id: string;
+  name: string;
+  modelType: ModelInstance["modelType"] | null;
+};
+
+export type ModelDiscoveryInput = {
+  providerId?: string;
+  presetId: string;
+  baseUrl: string;
+  apiKey: string;
+  protocol: string;
+};
+
+export type ModelDiscoveryResult = {
+  models: DiscoveredModel[];
+  truncated: boolean;
+};
+
 export type ModelDefaults = {
   routing_embedding: string | null;
   routing_llm: string | null;
@@ -169,6 +188,31 @@ export async function updateProvider(id: string, input: ProviderInput): Promise<
 
 export async function deleteProvider(id: string): Promise<void> {
   return apiRequest(`/providers/${id}`, { method: "DELETE" });
+}
+
+export async function discoverProviderModels(input: ModelDiscoveryInput): Promise<ModelDiscoveryResult> {
+  const body: Record<string, string> = {
+    preset_id: input.presetId,
+    base_url: input.baseUrl,
+    protocol: input.protocol,
+  };
+  if (input.providerId) body.provider_id = input.providerId;
+  if (input.apiKey) body.api_key = input.apiKey;
+  const result = await apiRequest<{
+    models: Array<{ id: string; name: string; model_type: ModelInstance["modelType"] | null }>;
+    truncated: boolean;
+  }>("/providers/discover-models", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return {
+    models: result.models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      modelType: model.model_type,
+    })),
+    truncated: result.truncated,
+  };
 }
 
 export async function listModels(providerId?: string): Promise<ModelInstance[]> {

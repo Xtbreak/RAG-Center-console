@@ -53,6 +53,34 @@ class ProviderRead(BaseModel):
     last_checked_at: datetime | None
 
 
+class ModelDiscoveryRequest(BaseModel):
+    provider_id: str | None = None
+    preset_id: str | None = Field(default=None, min_length=1, max_length=50)
+    base_url: HttpUrl | None = None
+    api_key: SecretStr | None = None
+    protocol: ProtocolName | None = None
+
+    @model_validator(mode="after")
+    def validate_discovery_source(self) -> "ModelDiscoveryRequest":
+        if self.provider_id:
+            return self
+        api_key = self.api_key.get_secret_value().strip() if self.api_key else ""
+        if self.base_url is None or self.protocol is None or not api_key:
+            raise ValueError("新供应商获取模型时必须填写 Base URL、API Key 和协议")
+        return self
+
+
+class DiscoveredModel(BaseModel):
+    id: str
+    name: str
+    model_type: ModelType | None = None
+
+
+class ModelDiscoveryResponse(BaseModel):
+    models: list[DiscoveredModel]
+    truncated: bool = False
+
+
 class ModelCreate(BaseModel):
     provider_id: str
     name: str = Field(min_length=1, max_length=120)

@@ -33,6 +33,26 @@ class ProbeResult:
     message: str
 
 
+@dataclass(slots=True)
+class DiscoveryTarget:
+    base_url: str
+    api_key: str
+    protocol: str
+    timeout_seconds: float = 20.0
+
+
+@dataclass(slots=True)
+class RemoteModel:
+    id: str
+    name: str
+
+
+@dataclass(slots=True)
+class DiscoveryResult:
+    models: list[RemoteModel]
+    truncated: bool
+
+
 def _endpoint(base_url: str, suffix: str) -> str:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -76,6 +96,91 @@ def _usage(payload: Any) -> dict[str, int | float] | None:
         for key, value in usage.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     } or None
+
+
+def _discovery_headers(protocol: str, api_key: str) -> dict[str, str]:
+    if protocol == "Anthropic Messages":
+        return {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        }
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+
+
+def _model_entries(payload: Any) -> tuple[list[Any], bool]:
+    if isinstance(payload, list):
+        return payload, False
+    if not isinstance(payload, dict):
+        raise HealthCheckFailure("供应商返回的模型列表结构无效")
+
+    entries = payload.get("data")
+    if isinstance(entries, dict):
+        entries = entries.get("models") or entries.get("data")
+    if not isinstance(entries, list):
+        entries = payload.get("models")
+    if not isinstance(entries, list):
+        raise HealthCheckFailure("响应缺少 data 或 models 模型列表")
+    return entries, bool(payload.get("has_more") or payload.get("next") or payload.get("next_page"))
+
+
+def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
+    entries, has_more = _model_entries(payload)
+    models_by_id: dict[str, RemoteModel] = {}
+    for entry in entries:
+        model_id: str | None = None
+        model_name: str | None = None
+        if isinstance(entry, str):
+            model_id = entry.strip()
+        elif isinstance(entry, dict):
+            raw_id = entry.get("id") or entry.get("model_id")
+            if isinstance(raw_id, str):
+                model_id = raw_id.strip()
+            raw_name = entry.get("display_name") or entry.get("name")
+            if isinstance(raw_name, str):
+                model_name = raw_name.strip()
+        if not model_id:
+            continue
+        models_by_id.setdefault(model_id, RemoteModel(id=model_id, name=model_name or model_id))
+
+    models = sorted(models_by_id.values(), key=lambda item: (item.id.casefold(), item.id))
+    truncated = has_more or len(models) > limit
+    return DiscoveryResult(models=models[:limit], truncated=truncated)
+
+
+async def discover_models(
+    target: DiscoveryTarget,
+    client: httpx.AsyncClient | None = None,
+) -> DiscoveryResult:
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=target.timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+        )
+    try:
+        response = await client.get(
+            _endpoint(target.base_url, "models"),
+            headers=_discovery_headers(target.protocol, target.api_key),
+        )
+        if response.status_code >= 400:
+            raise HealthCheckFailure(_error_message(response, target.api_key))
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HealthCheckFailure("供应商没有返回有效 JSON") from exc
+        return _parse_models(payload)
+    except httpx.TimeoutException as exc:
+        raise HealthCheckFailure("获取模型列表超时") from exc
+    except httpx.RequestError as exc:
+        raise HealthCheckFailure(f"无法连接供应商：{exc.__class__.__name__}") from exc
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 def _request_for(target: ProbeTarget, *, stream: bool = False) -> tuple[str, dict[str, str], dict[str, Any]]:
