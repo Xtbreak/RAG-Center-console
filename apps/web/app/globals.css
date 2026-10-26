@@ -445,8 +445,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 .model-discovery-check strong { color: var(--ink); font-size: 12px; }
 .model-discovery-check small { color: var(--ink-faint); font-family: var(--font-mono); font-size: 9px; }
 .model-discovery-check em { flex: 0 0 auto; padding: 3px 6px; border-radius: 4px; color: #0f6b4d; background: var(--success-soft); font-size: 9px; font-style: normal; font-weight: 700; }
-.model-discovery-config { display: grid; grid-template-columns: 1fr 1.35fr 1fr; gap: 10px; padding: 10px 11px 12px 39px; border-top: 1px solid var(--border); }
+.model-discovery-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 10px 11px 12px 39px; border-top: 1px solid var(--border); }
 .model-discovery-config label, .manual-model-input label { display: flex; min-width: 0; flex-direction: column; gap: 5px; color: var(--ink); font-size: 10px; font-weight: 600; }
+.model-auto-value { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.model-auto-value > span { color: var(--ink-soft); font-size: 10px; font-weight: 600; }
+.model-auto-value > strong { display: flex; min-height: 40px; align-items: center; gap: 7px; overflow-wrap: anywhere; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--ink); background: var(--surface-soft); font-size: 11px; }
+.model-auto-value small { flex: 0 0 auto; padding: 2px 5px; border-radius: 4px; color: #0f6b4d; background: var(--success-soft); font-size: 8px; font-weight: 700; }
+.model-advanced-settings { grid-column: 1 / -1; }
+.model-advanced-settings summary { width: fit-content; min-height: 32px; color: var(--primary-dark); cursor: pointer; font-size: 10px; font-weight: 700; line-height: 32px; }
+.model-advanced-settings > div { display: grid; grid-template-columns: 1fr 1.35fr; gap: 10px; padding-top: 6px; }
 .model-discovery-empty { padding: 22px 14px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--ink-soft); background: var(--surface-soft); font-size: 11px; text-align: center; }
 .model-preserve-note { margin: 9px 2px 0; color: var(--ink-faint); font-size: 10px; }
 .manual-model-section { margin-top: 10px; }
@@ -694,6 +701,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
   .model-discovery-error { flex-direction: column; }
   .model-discovery-error > div:last-child { width: 100%; flex-wrap: wrap; }
   .model-discovery-config { grid-template-columns: 1fr; padding-left: 39px; }
+  .model-advanced-settings > div { grid-template-columns: 1fr; }
   .manual-model-input { grid-template-columns: 1fr; }
   .manual-model-input .button { width: 100%; }
   .role-dialog { top: 50%; bottom: auto; left: 50%; width: min(92vw,560px); border-radius: 14px; transform: translate(-50%,-50%); animation: dialog-in 180ms ease; }

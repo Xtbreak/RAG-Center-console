@@ -73,7 +73,8 @@ class ModelDiscoveryRequest(BaseModel):
 class DiscoveredModel(BaseModel):
     id: str
     name: str
-    model_type: ModelType | None = None
+    model_type: ModelType
+    type_confidence: Literal["high", "medium", "low"]
 
 
 class ModelDiscoveryResponse(BaseModel):

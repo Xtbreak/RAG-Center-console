@@ -124,7 +124,17 @@ def test_new_provider_can_discover_models_before_saving(client, monkeypatch):
 
     async def successful_discovery(target: DiscoveryTarget):
         captured["target"] = target
-        return DiscoveryResult(models=[RemoteModel(id="remote-model", name="Remote model")], truncated=False)
+        return DiscoveryResult(
+            models=[
+                RemoteModel(
+                    id="qwen3.7-text-embedding",
+                    name="Qwen embedding",
+                    model_type="embedding",
+                    type_confidence="medium",
+                )
+            ],
+            truncated=False,
+        )
 
     monkeypatch.setattr("rag_center_console.api.discover_models", successful_discovery)
     response = client.post(
@@ -139,7 +149,14 @@ def test_new_provider_can_discover_models_before_saving(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {
-        "models": [{"id": "remote-model", "name": "Remote model", "model_type": None}],
+        "models": [
+            {
+                "id": "qwen3.7-text-embedding",
+                "name": "Qwen embedding",
+                "model_type": "embedding",
+                "type_confidence": "medium",
+            }
+        ],
         "truncated": False,
     }
     assert captured["target"].api_key == "direct-secret"

@@ -8,9 +8,10 @@ from rag_center_console.adapters import (
     HealthCheckFailure,
     ProbeTarget,
     discover_models,
+    infer_model_type,
     probe_model,
 )
-from rag_center_console.models import ProviderHealth
+from rag_center_console.models import ModelType, ProviderHealth
 
 
 @pytest.mark.asyncio
@@ -117,6 +118,20 @@ async def test_discovers_openai_data_models_with_deduplication_and_sorting():
         ("z-model", "Z model"),
     ]
     assert result.truncated is False
+
+
+@pytest.mark.parametrize(
+    ("model_id", "metadata", "expected_type", "expected_confidence"),
+    [
+        ("qwen3.7-text-embedding", None, ModelType.EMBEDDING, "medium"),
+        ("qwen3-reranker", None, ModelType.RERANK, "medium"),
+        ("qwen2.5-vl-72b", None, ModelType.VISION, "medium"),
+        ("opaque-model", {"task": "embedding"}, ModelType.EMBEDDING, "high"),
+        ("opaque-model", None, ModelType.LLM, "low"),
+    ],
+)
+def test_infers_model_type_from_metadata_then_model_id(model_id, metadata, expected_type, expected_confidence):
+    assert infer_model_type(model_id, metadata) == (expected_type, expected_confidence)
 
 
 @pytest.mark.asyncio

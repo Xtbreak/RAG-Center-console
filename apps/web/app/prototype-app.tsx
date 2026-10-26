@@ -83,6 +83,18 @@ function defaultProtocolForType(modelType: ModelInstance["modelType"]) {
   return "OpenAI Chat Completions";
 }
 
+function modelTypeLabel(modelType: ModelInstance["modelType"]) {
+  return { llm: "LLM", embedding: "Embedding", rerank: "Rerank", vision: "Vision" }[modelType];
+}
+
+function inferModelTypeFromId(modelId: string): { modelType: ModelInstance["modelType"]; confidence: "medium" | "low" } {
+  const normalized = modelId.toLocaleLowerCase().replaceAll("_", "-");
+  if (["rerank", "re-rank", "reranker", "ranking"].some((keyword) => normalized.includes(keyword))) return { modelType: "rerank", confidence: "medium" };
+  if (["embedding", "embeddings", "embed-", "-embed", "text2vec", "bge-", "/bge", "gte-", "/gte", "e5-", "/e5", "m3e"].some((keyword) => normalized.includes(keyword))) return { modelType: "embedding", confidence: "medium" };
+  if (["vision", "visual", "multimodal", "-vl", "/vl", "vl-", "llava"].some((keyword) => normalized.includes(keyword))) return { modelType: "vision", confidence: "medium" };
+  return { modelType: "llm", confidence: "low" };
+}
+
 const navigation: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: Role[] }> = [
   { key: "overview", label: "系统概览", icon: LayoutDashboard, roles: ["admin", "manager"] },
   { key: "knowledge", label: "知识库", icon: Database, roles: ["admin", "manager"] },
@@ -748,6 +760,8 @@ type ModelSelectionDraft = {
   modelType: ModelInstance["modelType"];
   protocol: string;
   vectorDimension: string;
+  typeConfidence: "high" | "medium" | "low";
+  typeSource: "automatic" | "saved" | "adjusted";
 };
 
 function AddProviderModal({ preset, configuredProvider, configuredModels, onOpenChange, setToast, setErrorToast, onSaved }: { preset: ProviderPreset | null; configuredProvider: ModelProvider | null; configuredModels: ModelInstance[]; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
@@ -793,13 +807,16 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
 
   const draftForModel = (model: DiscoveredModel): ModelSelectionDraft => {
     const existing = configuredModels.find((item) => item.modelId === model.id);
-    const modelType = existing?.modelType ?? model.modelType ?? allowedModelTypes[0] ?? "llm";
+    const inferredType = allowedModelTypes.includes(model.modelType) ? model.modelType : allowedModelTypes[0] ?? "llm";
+    const modelType = existing?.modelType ?? inferredType;
     return {
       id: model.id,
       name: existing?.name ?? model.name ?? model.id,
       modelType,
       protocol: existing?.protocol ?? protocolForType(modelType),
       vectorDimension: existing?.vectorDimension ? String(existing.vectorDimension) : "",
+      typeConfidence: existing ? "high" : model.typeConfidence,
+      typeSource: existing ? "saved" : "automatic",
     };
   };
 
@@ -853,7 +870,8 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
   const addManualModel = () => {
     const id = manualModelId.trim();
     if (!id) return;
-    const model: DiscoveredModel = { id, name: id, modelType: null };
+    const inferred = inferModelTypeFromId(id);
+    const model: DiscoveredModel = { id, name: id, modelType: inferred.modelType, typeConfidence: inferred.confidence };
     setDiscoveredModels((current) => current.some((item) => item.id === id) ? current : [...current, model].sort((a, b) => a.id.localeCompare(b.id)));
     setSelectedModels((current) => ({ ...current, [id]: current[id] ?? draftForModel(model) }));
     setManualModelId("");
@@ -903,6 +921,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
     const query = searchQuery.trim().toLocaleLowerCase();
     return !query || model.id.toLocaleLowerCase().includes(query) || model.name.toLocaleLowerCase().includes(query);
   });
+  const visibleModels = filteredModels.slice(0, 100);
   const canDiscover = Boolean(name.trim() && baseUrl.trim() && (configuredProvider || apiKey.trim()));
   const canSave = Boolean(
     name.trim()
@@ -934,16 +953,17 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
       </div>
       {discoveredModels.length ? <div className="model-discovery-search"><Search size={16} aria-hidden="true" /><input aria-label="搜索已获取的模型" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索模型 ID 或名称" /></div> : null}
       {discoveryTruncated ? <div className="provider-warning" role="status"><ShieldAlert size={15} aria-hidden="true" /><span>供应商仍有更多模型。本次最多显示 500 个，可使用搜索或手动填写模型 ID。</span></div> : null}
-      {filteredModels.length ? <div className="model-discovery-list" aria-label="供应商模型列表">
-        {filteredModels.map((model) => {
+      {visibleModels.length ? <div className="model-discovery-list" aria-label="供应商模型列表">
+        {visibleModels.map((model) => {
           const draft = selectedModels[model.id];
           const isSaved = configuredModels.some((item) => item.modelId === model.id);
           return <div className={cn("model-discovery-item", draft && "is-selected")} key={model.id}>
             <label className="model-discovery-check"><input type="checkbox" checked={Boolean(draft)} onChange={(event) => toggleModel(model, event.target.checked)} /><span><strong>{model.name}</strong>{model.name !== model.id ? <small>{model.id}</small> : null}</span>{isSaved ? <em>已保存</em> : null}</label>
-            {draft ? <div className="model-discovery-config"><label><span>模型类型</span><select value={draft.modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const modelType = event.target.value as ModelInstance["modelType"]; updateModelDraft(model.id, { modelType, protocol: protocolForType(modelType), vectorDimension: modelType === "embedding" ? draft.vectorDimension : "" }); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label><span>调用协议</span><select value={draft.protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => updateModelDraft(model.id, { protocol: event.target.value })}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => updateModelDraft(model.id, { vectorDimension: event.target.value })} /></label> : null}</div> : null}
+            {draft ? <div className="model-discovery-config"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(draft.modelType)} <small>{draft.typeSource === "saved" ? "已保存配置" : draft.typeSource === "adjusted" ? "已调整" : draft.typeConfidence === "low" ? "自动归类" : "自动识别"}</small></strong></div><div className="model-auto-value"><span>调用协议</span><strong>{draft.protocol}</strong></div>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => updateModelDraft(model.id, { vectorDimension: event.target.value })} /></label> : null}<details className="model-advanced-settings"><summary>调整识别结果</summary><div><label><span>模型类别</span><select value={draft.modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const modelType = event.target.value as ModelInstance["modelType"]; updateModelDraft(model.id, { modelType, protocol: protocolForType(modelType), vectorDimension: modelType === "embedding" ? draft.vectorDimension : "", typeSource: "adjusted" }); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{modelTypeLabel(type)}</option>)}</select></label><label><span>调用协议</span><select value={draft.protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => updateModelDraft(model.id, { protocol: event.target.value })}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div></details></div> : null}
           </div>;
         })}
       </div> : <div className="model-discovery-empty" role="status">{discoveredModels.length ? "没有符合搜索条件的模型。" : "供应商未返回模型，可重新获取或手动填写模型 ID。"}</div>}
+      {filteredModels.length > visibleModels.length ? <p className="model-preserve-note" role="status">当前显示前 100 个匹配模型，可继续输入关键词缩小范围。</p> : null}
       {configuredModels.length ? <p className="model-preserve-note">已保存的模型不会因取消勾选或本次未返回而被删除。</p> : null}
       <div className="manual-model-section"><button type="button" className="text-action" onClick={() => setManualMode((current) => !current)} aria-expanded={manualMode}>{manualMode ? "收起手动填写" : "手动填写模型 ID"}</button>{manualMode ? <div className="manual-model-input"><label><span>模型 ID</span><input value={manualModelId} onChange={(event) => setManualModelId(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addManualModel(); } }} placeholder="输入供应商公布的模型 ID" /></label><Button onClick={addManualModel} disabled={!manualModelId.trim()}>添加并选中</Button></div> : null}</div>
       <div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={!canSave || saving}>{saving ? "保存中…" : "保存配置"}</Button></div>

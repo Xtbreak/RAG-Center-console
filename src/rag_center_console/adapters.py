@@ -1,12 +1,12 @@
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .models import ProviderHealth
+from .models import ModelType, ProviderHealth
 
 
 class HealthCheckFailure(RuntimeError):
@@ -45,6 +45,8 @@ class DiscoveryTarget:
 class RemoteModel:
     id: str
     name: str
+    model_type: ModelType
+    type_confidence: Literal["high", "medium", "low"]
 
 
 @dataclass(slots=True)
@@ -127,6 +129,84 @@ def _model_entries(payload: Any) -> tuple[list[Any], bool]:
     return entries, bool(payload.get("has_more") or payload.get("next") or payload.get("next_page"))
 
 
+def _metadata_text(entry: dict[str, Any]) -> str:
+    values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item, nested_value in value.items():
+                if nested_value is True:
+                    values.append(str(item))
+                collect(nested_value)
+
+    for key in (
+        "model_type",
+        "type",
+        "task",
+        "category",
+        "capability",
+        "capabilities",
+        "endpoint_types",
+        "supported_tasks",
+        "architecture",
+        "input_modalities",
+        "output_modalities",
+    ):
+        collect(entry.get(key))
+    return " ".join(values).casefold()
+
+
+def _type_from_text(value: str) -> ModelType | None:
+    normalized = value.casefold().replace("_", "-")
+    if any(keyword in normalized for keyword in ("rerank", "re-rank", "reranker", "ranking")):
+        return ModelType.RERANK
+    if any(
+        keyword in normalized
+        for keyword in (
+            "embedding",
+            "embeddings",
+            "embed-",
+            "-embed",
+            "vectorize",
+            "feature-extraction",
+            "text2vec",
+            "mxbai-embed",
+            "jina-embedding",
+        )
+    ):
+        return ModelType.EMBEDDING
+    if any(keyword in normalized for keyword in ("vision", "visual", "multimodal", "image-to-text", "image-text")):
+        return ModelType.VISION
+    if any(keyword in normalized for keyword in ("chat", "completion", "generation", "reasoning", "language-model")):
+        return ModelType.LLM
+    return None
+
+
+def infer_model_type(
+    model_id: str,
+    entry: dict[str, Any] | None = None,
+) -> tuple[ModelType, Literal["high", "medium", "low"]]:
+    if entry:
+        metadata_type = _type_from_text(_metadata_text(entry))
+        if metadata_type is not None:
+            return metadata_type, "high"
+
+    normalized_id = model_id.casefold().replace("_", "-")
+    id_type = _type_from_text(normalized_id)
+    if id_type is not None:
+        return id_type, "medium"
+    if any(keyword in normalized_id for keyword in ("bge-", "/bge", "gte-", "/gte", "e5-", "/e5", "m3e")):
+        return ModelType.EMBEDDING, "medium"
+    if any(marker in normalized_id for marker in ("-vl", "/vl", "vl-", "qwen-vl", "llava")):
+        return ModelType.VISION, "medium"
+    return ModelType.LLM, "low"
+
+
 def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
     entries, has_more = _model_entries(payload)
     models_by_id: dict[str, RemoteModel] = {}
@@ -144,7 +224,16 @@ def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
                 model_name = raw_name.strip()
         if not model_id:
             continue
-        models_by_id.setdefault(model_id, RemoteModel(id=model_id, name=model_name or model_id))
+        model_type, type_confidence = infer_model_type(model_id, entry if isinstance(entry, dict) else None)
+        models_by_id.setdefault(
+            model_id,
+            RemoteModel(
+                id=model_id,
+                name=model_name or model_id,
+                model_type=model_type,
+                type_confidence=type_confidence,
+            ),
+        )
 
     models = sorted(models_by_id.values(), key=lambda item: (item.id.casefold(), item.id))
     truncated = has_more or len(models) > limit

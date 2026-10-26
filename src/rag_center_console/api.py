@@ -155,7 +155,15 @@ async def discover_provider_models(
     except HealthCheckFailure as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return ModelDiscoveryResponse(
-        models=[DiscoveredModel(id=model.id, name=model.name, model_type=None) for model in result.models],
+        models=[
+            DiscoveredModel(
+                id=model.id,
+                name=model.name,
+                model_type=model.model_type,
+                type_confidence=model.type_confidence,
+            )
+            for model in result.models
+        ],
         truncated=result.truncated,
     )
 

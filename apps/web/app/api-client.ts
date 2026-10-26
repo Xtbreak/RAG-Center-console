@@ -68,7 +68,8 @@ export type HealthCheckResult = {
 export type DiscoveredModel = {
   id: string;
   name: string;
-  modelType: ModelInstance["modelType"] | null;
+  modelType: ModelInstance["modelType"];
+  typeConfidence: "high" | "medium" | "low";
 };
 
 export type ModelDiscoveryInput = {
@@ -199,7 +200,7 @@ export async function discoverProviderModels(input: ModelDiscoveryInput): Promis
   if (input.providerId) body.provider_id = input.providerId;
   if (input.apiKey) body.api_key = input.apiKey;
   const result = await apiRequest<{
-    models: Array<{ id: string; name: string; model_type: ModelInstance["modelType"] | null }>;
+    models: Array<{ id: string; name: string; model_type: ModelInstance["modelType"]; type_confidence: "high" | "medium" | "low" }>;
     truncated: boolean;
   }>("/providers/discover-models", {
     method: "POST",
@@ -210,6 +211,7 @@ export async function discoverProviderModels(input: ModelDiscoveryInput): Promis
       id: model.id,
       name: model.name,
       modelType: model.model_type,
+      typeConfidence: model.type_confidence,
     })),
     truncated: result.truncated,
   };
