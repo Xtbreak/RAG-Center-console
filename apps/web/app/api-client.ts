@@ -1,4 +1,4 @@
-import type { KnowledgeBase, KnowledgeChunk, KnowledgeDocument, ModelInstance, ModelProvider, Role } from "./prototype-models";
+import type { ChunkMethod, KnowledgeBase, KnowledgeChunk, KnowledgeDocument, ModelInstance, ModelProvider, Role } from "./prototype-models";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly detail?: unknown) {
@@ -287,6 +287,8 @@ type KnowledgeBaseWire = {
   vector_dimension: number;
   chunk_size: number;
   chunk_overlap: number;
+  chunk_method: ChunkMethod;
+  heading_level: number;
   status: KnowledgeBase["status"];
   rebuild_error: string | null;
   document_count: number;
@@ -307,6 +309,10 @@ type DocumentWire = {
   error_message: string | null;
   parse_strategy: KnowledgeDocument["parseStrategy"];
   enhance_images: boolean;
+  chunk_method: ChunkMethod;
+  chunk_size: number;
+  chunk_overlap: number;
+  heading_level: number;
   chunk_count: number;
   job_id: string | null;
   job_status: KnowledgeDocument["jobStatus"];
@@ -329,12 +335,17 @@ type ChunkWire = {
   updated_at: string;
 };
 
-export type KnowledgeBaseInput = {
+export type ChunkSettings = {
+  chunkMethod: ChunkMethod;
+  chunkSize: number;
+  chunkOverlap: number;
+  headingLevel: number;
+};
+
+export type KnowledgeBaseInput = ChunkSettings & {
   name: string;
   description: string;
   embeddingModelId: string;
-  chunkSize: number;
-  chunkOverlap: number;
 };
 
 export type DuplicateDocument = { id: string; filename: string; created_at: string };
@@ -349,6 +360,8 @@ function mapKnowledgeBase(kb: KnowledgeBaseWire): KnowledgeBase {
     vectorDimension: kb.vector_dimension,
     chunkSize: kb.chunk_size,
     chunkOverlap: kb.chunk_overlap,
+    chunkMethod: kb.chunk_method,
+    headingLevel: kb.heading_level,
     status: kb.status,
     rebuildError: kb.rebuild_error,
     documentCount: kb.document_count,
@@ -371,6 +384,10 @@ function mapDocument(document: DocumentWire): KnowledgeDocument {
     errorMessage: document.error_message,
     parseStrategy: document.parse_strategy,
     enhanceImages: document.enhance_images,
+    chunkMethod: document.chunk_method,
+    chunkSize: document.chunk_size,
+    chunkOverlap: document.chunk_overlap,
+    headingLevel: document.heading_level,
     chunkCount: document.chunk_count,
     jobId: document.job_id,
     jobStatus: document.job_status,
@@ -403,6 +420,8 @@ function knowledgeBaseBody(input: Partial<KnowledgeBaseInput>) {
   if (input.embeddingModelId !== undefined) body.embedding_model_id = input.embeddingModelId;
   if (input.chunkSize !== undefined) body.chunk_size = input.chunkSize;
   if (input.chunkOverlap !== undefined) body.chunk_overlap = input.chunkOverlap;
+  if (input.chunkMethod !== undefined) body.chunk_method = input.chunkMethod;
+  if (input.headingLevel !== undefined) body.heading_level = input.headingLevel;
   return JSON.stringify(body);
 }
 
@@ -430,7 +449,7 @@ export async function listDocuments(knowledgeBaseId: string): Promise<KnowledgeD
 export function uploadDocument(
   knowledgeBaseId: string,
   file: File,
-  options: { parseStrategy: KnowledgeDocument["parseStrategy"]; enhanceImages: boolean; allowDuplicate: boolean },
+  options: ChunkSettings & { parseStrategy: KnowledgeDocument["parseStrategy"]; enhanceImages: boolean; allowDuplicate: boolean },
   onProgress?: (fraction: number) => void,
 ): Promise<KnowledgeDocument> {
   const form = new FormData();
@@ -438,6 +457,10 @@ export function uploadDocument(
   form.append("parse_strategy", options.parseStrategy);
   form.append("enhance_images", String(options.enhanceImages));
   form.append("allow_duplicate", String(options.allowDuplicate));
+  form.append("chunk_method", options.chunkMethod);
+  form.append("chunk_size", String(options.chunkSize));
+  form.append("chunk_overlap", String(options.chunkOverlap));
+  form.append("heading_level", String(options.headingLevel));
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("POST", `/api/v1/knowledge-bases/${knowledgeBaseId}/documents`);

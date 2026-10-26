@@ -1,5 +1,12 @@
 export type Role = "admin" | "manager" | "user";
 
+export type ChunkMethod = "heading" | "recursive";
+
+export const chunkMethodCopy: Record<ChunkMethod, { name: string; detail: string }> = {
+  heading: { name: "按标题切分", detail: "按文档标题划分章节，每节独立成段，过长的章节再递归切分。无 Markdown 标题时自动识别“第一章、一、（一）、1.1”等编号标题。适合制度、手册、规范。" },
+  recursive: { name: "递归切分", detail: "依次按段落、换行、句子、标点切分，再合并到目标长度，不受标题边界限制。适合结构不规整的文本。" },
+};
+
 export type KnowledgeBase = {
   id: string;
   name: string;
@@ -9,6 +16,8 @@ export type KnowledgeBase = {
   vectorDimension: number;
   chunkSize: number;
   chunkOverlap: number;
+  chunkMethod: ChunkMethod;
+  headingLevel: number;
   status: "ready" | "rebuilding" | "rebuild_failed";
   rebuildError: string | null;
   documentCount: number;
@@ -40,6 +49,10 @@ export type KnowledgeDocument = {
   errorMessage: string | null;
   parseStrategy: "smart" | "fast";
   enhanceImages: boolean;
+  chunkMethod: ChunkMethod;
+  chunkSize: number;
+  chunkOverlap: number;
+  headingLevel: number;
   chunkCount: number;
   jobId: string | null;
   jobStatus: "queued" | "running" | "succeeded" | "failed" | "cancelled" | null;

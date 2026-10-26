@@ -404,6 +404,18 @@ input, textarea, select { color: var(--ink); }
 .inline-alert-warning { border-color: #e9cf8d; color: #69470e; background: var(--warning-soft); }
 .inline-alert-info { border-color: #b9c8f3; color: #23408f; background: var(--surface-blue); }
 .field-error { color: #a72e3b; }
+.chunk-settings { display: flex; min-width: 0; flex-direction: column; gap: 10px; margin: 0; padding: 0; border: 0; }
+.chunk-settings legend { margin-bottom: 8px; padding: 0; color: var(--ink); font-size: 11px; font-weight: 600; }
+.chunk-settings:disabled { opacity: 0.6; }
+.chunk-method-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chunk-settings .option-card { display: grid; grid-template-columns: 18px 1fr 22px; flex-direction: initial; align-items: start; gap: 9px; color: var(--ink); font-size: 12px; }
+.chunk-settings .option-card small { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.wizard-body .form-hint { margin: 0; color: var(--ink-faint); font-size: 11px; }
+.chunk-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.chunk-params label { display: flex; flex-direction: column; gap: 6px; color: var(--ink-soft); font-size: 11px; }
+.chunk-params label > span { color: var(--ink); font-weight: 600; }
+.field-hint { color: var(--ink-faint) !important; font-size: 10px; }
+.document-meta { color: var(--ink-faint); }
 .settings-stack { display: flex; flex-direction: column; gap: 18px; }
 .danger-zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; }
 .danger-zone h2 { margin: 0; font-size: 14px; }
@@ -696,6 +708,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); outlin
 
 @media (max-width: 680px) {
   .chunk-toolbar .search-box { width: 100%; }
+  .chunk-method-options { grid-template-columns: 1fr; }
   .table-panel .data-header { display: none; }
   .table-panel .data-row { min-width: 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name actions" "status status"; row-gap: 8px; padding: 12px 14px; }
   .table-panel .data-row > span:not(.document-name):not(.document-status):not(.row-actions) { display: none; }

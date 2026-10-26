@@ -9,6 +9,7 @@ import {
   Database,
   FileText,
   Layers3,
+  ListTree,
   Pencil,
   Plus,
   RefreshCw,
@@ -17,6 +18,7 @@ import {
   Sparkles,
   Trash2,
   UploadCloud,
+  WrapText,
   X,
   Zap,
 } from "lucide-react";
@@ -35,6 +37,7 @@ import {
   updateChunk,
   updateKnowledgeBase,
   uploadDocument,
+  type ChunkSettings,
   type KnowledgeBaseInput,
 } from "./api-client";
 import {
@@ -42,6 +45,8 @@ import {
   IMAGE_EXTENSIONS,
   LOCAL_PARSE_EXTENSIONS,
   MAX_UPLOAD_BYTES,
+  chunkMethodCopy,
+  type ChunkMethod,
   type KnowledgeBase,
   type KnowledgeChunk,
   type KnowledgeDocument,
@@ -125,6 +130,47 @@ function useEmbeddingModels(enabled: boolean) {
     return () => { alive = false; };
   }, [enabled]);
   return { models, loading, error };
+}
+
+type ChunkForm = { chunkMethod: ChunkMethod; chunkSize: string; chunkOverlap: string; headingLevel: string };
+
+function chunkFormFrom(settings: ChunkSettings): ChunkForm {
+  return { chunkMethod: settings.chunkMethod, chunkSize: String(settings.chunkSize), chunkOverlap: String(settings.chunkOverlap), headingLevel: String(settings.headingLevel) };
+}
+
+const DEFAULT_CHUNK_FORM = chunkFormFrom({ chunkMethod: "heading", chunkSize: 800, chunkOverlap: 120, headingLevel: 6 });
+
+function parseChunkForm(form: ChunkForm): { settings: ChunkSettings; error: string | null } {
+  const settings = { chunkMethod: form.chunkMethod, chunkSize: Number(form.chunkSize), chunkOverlap: Number(form.chunkOverlap), headingLevel: Number(form.headingLevel) };
+  const error = !Number.isInteger(settings.chunkSize) || settings.chunkSize < 100 || settings.chunkSize > 4000 ? "分段大小需为 100–4000 的整数"
+    : !Number.isInteger(settings.chunkOverlap) || settings.chunkOverlap < 0 || settings.chunkOverlap > 1000 ? "分段重叠需为 0–1000 的整数"
+    : settings.chunkOverlap >= settings.chunkSize ? "分段重叠必须小于分段大小" : null;
+  return { settings, error };
+}
+
+export function describeChunkSettings(settings: ChunkSettings) {
+  const level = settings.chunkMethod === "heading" ? (settings.headingLevel >= 6 ? "（全部标题）" : `（至 H${settings.headingLevel}）`) : "";
+  return `${chunkMethodCopy[settings.chunkMethod].name}${level} · ${settings.chunkSize} Token / 重叠 ${settings.chunkOverlap}`;
+}
+
+function ChunkSettingsFields({ id, value, onChange, disabled }: { id: string; value: ChunkForm; onChange: (value: ChunkForm) => void; disabled?: boolean }) {
+  const icons: Record<ChunkMethod, typeof ListTree> = { heading: ListTree, recursive: WrapText };
+  return (
+    <fieldset className="chunk-settings" disabled={disabled}>
+      <legend>切分方式</legend>
+      <div className="chunk-method-options">
+        {(Object.keys(chunkMethodCopy) as ChunkMethod[]).map((method) => {
+          const Icon = icons[method];
+          return <label key={method} className="option-card"><input type="radio" name={`${id}-chunk-method`} checked={value.chunkMethod === method} onChange={() => onChange({ ...value, chunkMethod: method })} /><span><strong>{chunkMethodCopy[method].name}</strong><small>{chunkMethodCopy[method].detail}</small></span><Icon size={18} /></label>;
+        })}
+      </div>
+      <div className="chunk-params">
+        {value.chunkMethod === "heading" ? <label><span>切分到标题层级</span><select value={value.headingLevel} onChange={(event) => onChange({ ...value, headingLevel: event.target.value })}>{[1, 2, 3, 4, 5, 6].map((level) => <option key={level} value={level}>{level === 6 ? "全部标题（H1–H6）" : `第 ${level} 级（H1–H${level}）`}</option>)}</select><small className="field-hint">更深的标题并入所属章节</small></label> : null}
+        <label><span>分段大小（Token）</span><input type="number" min={100} max={4000} value={value.chunkSize} onChange={(event) => onChange({ ...value, chunkSize: event.target.value })} /></label>
+        <label><span>分段重叠（Token）</span><input type="number" min={0} max={1000} value={value.chunkOverlap} onChange={(event) => onChange({ ...value, chunkOverlap: event.target.value })} /></label>
+      </div>
+    </fieldset>
+  );
 }
 
 function InlineAlert({ tone = "error", title, children, action }: { tone?: "error" | "warning" | "info"; title?: string; children: React.ReactNode; action?: React.ReactNode }) {
@@ -333,7 +379,7 @@ function DocumentsPanel({ documents, loaded, error, reload, disabled, onImport, 
           const busy = busyId === document.id;
           return (
             <div className="data-row" role="row" key={document.id}>
-              <span className="document-name"><span className="file-mini"><FileText size={16} /></span><span className="document-title"><strong title={document.filename}>{document.filename}</strong>{document.errorMessage ? <small className={document.status === "failed" ? "document-error" : "document-warning"} title={document.errorMessage}>{document.errorMessage}</small> : null}</span></span>
+              <span className="document-name"><span className="file-mini"><FileText size={16} /></span><span className="document-title"><strong title={document.filename}>{document.filename}</strong>{document.errorMessage ? <small className={document.status === "failed" ? "document-error" : "document-warning"} title={document.errorMessage}>{document.errorMessage}</small> : <small className="document-meta">{describeChunkSettings(document)}</small>}</span></span>
               <span>{document.extension.toUpperCase()}</span>
               <span className="numeric">{formatBytes(document.sizeBytes)}</span>
               <span className="numeric">{document.chunkCount || "—"}</span>
@@ -487,7 +533,8 @@ function RetrievalPanel({ hasDocuments }: { hasDocuments: boolean }) {
 
 function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase; setToast: Notify; onSaved: () => Promise<void>; onDeleted: () => Promise<void> }) {
   const { models, loading, error: modelsError } = useEmbeddingModels(true);
-  const [form, setForm] = useState({ name: kb.name, description: kb.description, embeddingModelId: kb.embeddingModelId, chunkSize: String(kb.chunkSize), chunkOverlap: String(kb.chunkOverlap) });
+  const [form, setForm] = useState({ name: kb.name, description: kb.description, embeddingModelId: kb.embeddingModelId });
+  const [chunkForm, setChunkForm] = useState<ChunkForm>(chunkFormFrom(kb));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -495,18 +542,16 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const rebuilding = kb.status === "rebuilding";
 
-  const chunkSize = Number(form.chunkSize);
-  const chunkOverlap = Number(form.chunkOverlap);
-  const validation = !form.name.trim() ? "请填写知识库名称"
-    : !Number.isInteger(chunkSize) || chunkSize < 100 || chunkSize > 4000 ? "分段大小需为 100–4000 的整数"
-    : !Number.isInteger(chunkOverlap) || chunkOverlap < 0 || chunkOverlap > 1000 ? "分段重叠需为 0–1000 的整数"
-    : chunkOverlap >= chunkSize ? "分段重叠必须小于分段大小" : null;
+  const { settings: chunk, error: chunkError } = parseChunkForm(chunkForm);
+  const validation = !form.name.trim() ? "请填写知识库名称" : chunkError;
   const changes: Partial<KnowledgeBaseInput> = {};
   if (form.name.trim() !== kb.name) changes.name = form.name.trim();
   if (form.description.trim() !== kb.description) changes.description = form.description.trim();
   if (form.embeddingModelId !== kb.embeddingModelId) changes.embeddingModelId = form.embeddingModelId;
-  if (chunkSize !== kb.chunkSize) changes.chunkSize = chunkSize;
-  if (chunkOverlap !== kb.chunkOverlap) changes.chunkOverlap = chunkOverlap;
+  if (chunk.chunkSize !== kb.chunkSize) changes.chunkSize = chunk.chunkSize;
+  if (chunk.chunkOverlap !== kb.chunkOverlap) changes.chunkOverlap = chunk.chunkOverlap;
+  if (chunk.chunkMethod !== kb.chunkMethod) changes.chunkMethod = chunk.chunkMethod;
+  if (chunk.headingLevel !== kb.headingLevel) changes.headingLevel = chunk.headingLevel;
   const dirty = Object.keys(changes).length > 0;
   const modelChanged = Boolean(changes.embeddingModelId);
   const currentModelMissing = !models.some((model) => model.id === kb.embeddingModelId);
@@ -543,7 +588,7 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
   return (
     <div className="settings-stack">
       <section className="panel settings-form">
-        <div className="panel-heading compact"><div><h2>知识库配置</h2><p>更换 Embedding 模型会重建全部向量；分段参数只影响之后导入或重新处理的文档</p></div></div>
+        <div className="panel-heading compact"><div><h2>知识库配置</h2><p>更换 Embedding 模型会重建全部向量；切分设置是导入新文档时的默认值，已导入的文档保留原设置</p></div></div>
         <div className="form-grid">
           <label><span>知识库名称</span><input value={form.name} maxLength={120} onChange={(event) => setForm({ ...form, name: event.target.value })} disabled={rebuilding} /></label>
           <label><span>Embedding 模型</span>
@@ -554,8 +599,7 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
             {modelsError ? <small>{modelsError}</small> : null}
           </label>
           <label className="wide-field"><span>知识库说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" disabled={rebuilding} /></label>
-          <label><span>分段大小（Token）</span><input type="number" min={100} max={4000} value={form.chunkSize} onChange={(event) => setForm({ ...form, chunkSize: event.target.value })} disabled={rebuilding} /></label>
-          <label><span>分段重叠（Token）</span><input type="number" min={0} max={1000} value={form.chunkOverlap} onChange={(event) => setForm({ ...form, chunkOverlap: event.target.value })} disabled={rebuilding} /></label>
+          <div className="wide-field"><ChunkSettingsFields id="kb-settings" value={chunkForm} onChange={setChunkForm} disabled={rebuilding} /></div>
         </div>
         {modelChanged && kb.chunkCount ? <div className="panel-alert"><InlineAlert tone="warning" title="保存后将重建向量索引">将使用新模型重新向量化全部 {kb.chunkCount.toLocaleString()} 个分段，期间不能导入文档或编辑分段；重建失败时保留原索引。</InlineAlert></div> : null}
         {dirty && validation ? <div className="panel-alert"><InlineAlert tone="warning">{validation}</InlineAlert></div> : null}
@@ -573,27 +617,24 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
 
 function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: boolean; role: Role; onOpenChange: (open: boolean) => void; onCreated: (kb: KnowledgeBase) => Promise<void> }) {
   const { models, loading, error: modelsError } = useEmbeddingModels(open);
-  const [form, setForm] = useState({ name: "", description: "", embeddingModelId: "", chunkSize: "800", chunkOverlap: "120" });
+  const [form, setForm] = useState({ name: "", description: "", embeddingModelId: "" });
+  const [chunkForm, setChunkForm] = useState<ChunkForm>(DEFAULT_CHUNK_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const embeddingModelId = form.embeddingModelId || models[0]?.id || "";
-  const chunkSize = Number(form.chunkSize);
-  const chunkOverlap = Number(form.chunkOverlap);
-  const validation = !Number.isInteger(chunkSize) || chunkSize < 100 || chunkSize > 4000 ? "分段大小需为 100–4000 的整数"
-    : !Number.isInteger(chunkOverlap) || chunkOverlap < 0 || chunkOverlap > 1000 ? "分段重叠需为 0–1000 的整数"
-    : chunkOverlap >= chunkSize ? "分段重叠必须小于分段大小" : null;
+  const { settings: chunk, error: validation } = parseChunkForm(chunkForm);
 
   const close = (next: boolean) => {
     if (submitting) return;
     onOpenChange(next);
-    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", embeddingModelId: "", chunkSize: "800", chunkOverlap: "120" }); setError(null); }, 150);
+    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", embeddingModelId: "" }); setChunkForm(DEFAULT_CHUNK_FORM); setError(null); }, 150);
   };
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      const created = await createKnowledgeBase({ name: form.name.trim(), description: form.description.trim(), embeddingModelId, chunkSize, chunkOverlap });
+      const created = await createKnowledgeBase({ name: form.name.trim(), description: form.description.trim(), embeddingModelId, ...chunk });
       setSubmitting(false);
       close(false);
       await onCreated(created);
@@ -604,7 +645,7 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
   };
 
   return (
-    <Modal open={open} onOpenChange={close} title="新建知识库" description="每个知识库使用独立的 Embedding 模型和向量集合。">
+    <Modal open={open} onOpenChange={close} title="新建知识库" description="每个知识库使用独立的 Embedding 模型和向量集合。" width="wide">
       <div className="modal-form">
         <label><span>名称</span><input autoFocus value={form.name} maxLength={120} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="输入知识库名称" /></label>
         <label><span>说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" /></label>
@@ -617,10 +658,7 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
           {modelsError ? <small className="field-error">{modelsError}</small> : null}
           {!loading && !models.length && !modelsError ? <small>{role === "admin" ? "请先在“模型服务”中添加启用的 Embedding 模型并填写向量维度。" : "请联系管理员在“模型服务”中添加 Embedding 模型。"}</small> : null}
         </label>
-        <div className="form-row">
-          <label><span>分段大小（Token）</span><input type="number" min={100} max={4000} value={form.chunkSize} onChange={(event) => setForm({ ...form, chunkSize: event.target.value })} /></label>
-          <label><span>分段重叠（Token）</span><input type="number" min={0} max={1000} value={form.chunkOverlap} onChange={(event) => setForm({ ...form, chunkOverlap: event.target.value })} /></label>
-        </div>
+        <ChunkSettingsFields id="kb-create" value={chunkForm} onChange={setChunkForm} />
         {validation ? <InlineAlert tone="warning">{validation}</InlineAlert> : null}
         {error ? <InlineAlert>{error}</InlineAlert> : null}
       </div>
@@ -635,6 +673,8 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
   const [fileError, setFileError] = useState<string | null>(null);
   const [parseStrategy, setParseStrategy] = useState<"smart" | "fast">("smart");
   const [enhanceImages, setEnhanceImages] = useState(true);
+  const [chunkForm, setChunkForm] = useState<ChunkForm>(chunkFormFrom(kb));
+  const { settings: chunk, error: chunkError } = parseChunkForm(chunkForm);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -643,7 +683,7 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
   const local = LOCAL_PARSE_EXTENSIONS.includes(extension);
   const image = IMAGE_EXTENSIONS.includes(extension);
 
-  const reset = () => { setStep(1); setFile(null); setFileError(null); setParseStrategy("smart"); setEnhanceImages(true); setProgress(0); setSubmitError(null); setDuplicate(null); };
+  const reset = () => { setStep(1); setFile(null); setFileError(null); setParseStrategy("smart"); setEnhanceImages(true); setChunkForm(chunkFormFrom(kb)); setProgress(0); setSubmitError(null); setDuplicate(null); };
   const close = (next: boolean) => {
     if (uploading) return;
     onOpenChange(next);
@@ -669,7 +709,7 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
     setSubmitError(null);
     setDuplicate(null);
     try {
-      const document = await uploadDocument(kb.id, file, { parseStrategy, enhanceImages, allowDuplicate }, setProgress);
+      const document = await uploadDocument(kb.id, file, { parseStrategy, enhanceImages, allowDuplicate, ...chunk }, setProgress);
       setUploading(false);
       close(false);
       await onImported(document);
@@ -683,7 +723,7 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
   const parseLabel = local ? "本地结构化解析" : parseStrategy === "smart" ? "智能解析（大模型增强）" : "快速解析";
   return (
     <Modal open={open} onOpenChange={close} title="导入知识" description={`导入到“${kb.name}”，依次完成解析、切分和向量化。`} width="wide">
-      <div className="wizard-steps" aria-label={`当前第 ${step} 步，共 3 步`}>{["选择文件", "解析设置", "确认导入"].map((label, index) => <div key={label} className={cn(index + 1 < step && "wizard-done", index + 1 === step && "wizard-current")}><span>{index + 1 < step ? <Check size={13} /> : index + 1}</span><small>{label}</small></div>)}</div>
+      <div className="wizard-steps" aria-label={`当前第 ${step} 步，共 3 步`}>{["选择文件", "解析与切分", "确认导入"].map((label, index) => <div key={label} className={cn(index + 1 < step && "wizard-done", index + 1 === step && "wizard-current")}><span>{index + 1 < step ? <Check size={13} /> : index + 1}</span><small>{label}</small></div>)}</div>
       {step === 1 ? <div className="wizard-body">
         <input className="sr-only" id="knowledge-file" type="file" accept={ACCEPTED_EXTENSIONS.map((item) => `.${item}`).join(",")} onChange={(event) => { choose(event.target.files?.[0] ?? null); event.target.value = ""; }} />
         <label className="drop-zone" htmlFor="knowledge-file"><UploadCloud size={26} /><strong>点击选择文件</strong><span>支持 Word、PDF、Markdown、图片、CSV 和 Excel，单文件最大 100 MB</span></label>
@@ -696,12 +736,15 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
           <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "fast"} onChange={() => setParseStrategy("fast")} /><span><strong>快速解析</strong><small>标准版面解析，适合结构简单的数字文档，速度更快、费用更低。</small></span><Zap size={18} /></label>
         </>}
         {image ? <label className="switch-row"><span><strong>图片语义描述</strong><small>OCR 之外，由管理员配置的视觉模型补充图表和照片的语义描述</small></span><input type="checkbox" checked={enhanceImages} onChange={(event) => setEnhanceImages(event.target.checked)} aria-label="启用图片语义描述" /></label> : null}
-        <p className="form-hint">分段大小 {kb.chunkSize} Token，重叠 {kb.chunkOverlap} Token，可在知识库“配置”中调整。</p>
+        <ChunkSettingsFields id="import" value={chunkForm} onChange={setChunkForm} />
+        <p className="form-hint">默认值来自知识库配置，这里的调整只作用于本次导入。</p>
+        {chunkError ? <InlineAlert tone="warning">{chunkError}</InlineAlert> : null}
       </div> : null}
       {step === 3 ? <div className="wizard-body confirm-grid">
         <div><span>文件</span><strong>{file?.name}</strong></div>
         <div><span>大小</span><strong>{file ? formatBytes(file.size) : "—"}</strong></div>
         <div><span>解析方式</span><strong>{parseLabel}</strong></div>
+        <div><span>切分方式</span><strong>{describeChunkSettings(chunk)}</strong></div>
         <div><span>Embedding</span><strong>{kb.embeddingModelName} · {kb.vectorDimension} 维</strong></div>
         {image ? <div><span>图片处理</span><strong>{enhanceImages ? "OCR + 视觉描述" : "仅 OCR"}</strong></div> : null}
         {!local ? <div className="privacy-note"><ShieldAlert size={17} /><span>文档内容将发送至阿里云文档智能解析。请确认文件符合企业数据出域规范。</span></div> : null}
@@ -711,7 +754,7 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
       </div> : null}
       <div className="dialog-actions">
         <Button onClick={() => step === 1 ? close(false) : setStep(step - 1)} disabled={uploading}>{step === 1 ? "取消" : "上一步"}</Button>
-        <Button variant="primary" onClick={() => step === 3 ? void submit(false) : setStep(step + 1)} disabled={!file || Boolean(fileError) || uploading}>{step === 3 ? (uploading ? "导入中…" : submitError ? "重试导入" : "开始导入") : "下一步"}</Button>
+        <Button variant="primary" onClick={() => step === 3 ? void submit(false) : setStep(step + 1)} disabled={!file || Boolean(fileError) || uploading || (step >= 2 && Boolean(chunkError))}>{step === 3 ? (uploading ? "导入中…" : submitError ? "重试导入" : "开始导入") : "下一步"}</Button>
       </div>
     </Modal>
   );
