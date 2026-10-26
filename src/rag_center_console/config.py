@@ -14,6 +14,22 @@ class Settings(BaseSettings):
     provider_timeout_seconds: float = 30.0
     auto_create_schema: bool = True
 
+    s3_endpoint_url: str = "http://localhost:9000"
+    s3_access_key: str = "rag_center"
+    s3_secret_key: str = "rag-center-dev-secret"
+    s3_bucket: str = "rag-center"
+    s3_region: str = "us-east-1"
+
+    redis_url: str = "redis://localhost:6379/0"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
+
+    aliyun_docmind_access_key_id: str = ""
+    aliyun_docmind_access_key_secret: str = ""
+    aliyun_docmind_endpoint: str = "docmind-api.cn-hangzhou.aliyuncs.com"
+
+    max_upload_bytes: int = 100 * 1024 * 1024
+
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"),
         env_prefix="RAG_",
