@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .adapters import DiscoveryTarget, HealthCheckFailure, discover_models
+from .auth import SESSION_COOKIE
 from .database import get_db
 from .models import AnonymousSession, ModelDefault, ModelDefinition, Provider, Role
 from .schemas import (
@@ -29,7 +30,6 @@ from .services import check_provider_health, first_enabled_model
 
 
 router = APIRouter()
-SESSION_COOKIE = "rag_session"
 DEFAULT_PURPOSES = ("routing_embedding", "routing_llm", "default_rerank", "vision")
 
 
