@@ -151,7 +151,11 @@ def _parse(db: Session, services: PipelineServices, job: IngestionJob, document:
     parser = services.parser_factory()
     try:
         parsed = parser.parse(
-            data, document.filename, document.extension, should_cancel=lambda: _is_cancelled(db, job)
+            data,
+            document.filename,
+            document.extension,
+            should_cancel=lambda: _is_cancelled(db, job),
+            llm_enhancement=document.parse_strategy == "smart",
         )
     except ParseCancelled as exc:
         raise JobCancelled() from exc
@@ -357,13 +361,14 @@ def rebuild_knowledge_base(
             except KNOWN_ERRORS:
                 logger.warning("重建失败后清理集合 %s 失败", new_collection)
             kb.status = KnowledgeBaseStatus.REBUILD_FAILED.value
+            kb.rebuild_error = (str(exc) if isinstance(exc, KNOWN_ERRORS) else "重建过程中发生内部错误，请查看服务日志")[:500]
             db.commit()
             if isinstance(exc, KNOWN_ERRORS):
                 raise
             logger.exception("知识库 %s 重建失败", kb.id)
             raise
         kb.embedding_model_id, kb.vector_dimension = model.id, model.vector_dimension
-        kb.collection_name, kb.status = new_collection, KnowledgeBaseStatus.READY.value
+        kb.collection_name, kb.status, kb.rebuild_error = new_collection, KnowledgeBaseStatus.READY.value, None
         db.commit()
         try:
             services.vector_store.delete_collection(old_collection)

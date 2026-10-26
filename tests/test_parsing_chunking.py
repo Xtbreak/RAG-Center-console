@@ -122,7 +122,7 @@ class FakeSdk:
         self.statuses, self.layouts, self.calls = list(statuses), layouts, []
 
     def submit_doc_parser_job_advance(self, request, runtime):
-        self.calls.append(("submit", request.file_name, request.file_url_object.read()))
+        self.calls.append(("submit", request.file_name, request.file_url_object.read(), request.llm_enhancement))
         return NS(body=NS(data=NS(id="job-1")))
 
     def query_doc_parser_status(self, request):
@@ -144,7 +144,8 @@ def test_docmind_polls_then_pages_through_layouts(monkeypatch):
     sdk = FakeSdk(["Processing", "Processing", "success"], layouts)
     parsed = parser(sdk).parse(b"%PDF", "a.pdf", "pdf")
     assert [e.text for e in parsed.elements] == [f"段{i}" for i in range(5)]
-    assert sdk.calls[0] == ("submit", "a.pdf", b"%PDF")
+    assert sdk.calls[0] == ("submit", "a.pdf", b"%PDF", True)
+    parser(FakeSdk(["success"], layouts)).parse(b"%PDF", "a.pdf", "pdf", llm_enhancement=False)
     assert [c[1] for c in sdk.calls if c[0] == "result"] == [0, 2, 4]
 
 

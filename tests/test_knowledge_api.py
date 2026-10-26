@@ -190,6 +190,7 @@ def test_cancel_queued_and_running_jobs(env):
     with SessionLocal() as db:
         db.get(IngestionJob, running_doc["job_id"]).status = "running"
         db.commit()
+    assert client.get(f"/api/v1/knowledge-bases/{kb['id']}").json()["processing_document_count"] == 1
     response = client.post(f"/api/v1/documents/{running_doc['id']}/cancel").json()
     assert response["job_status"] == "running"
     with SessionLocal() as db:

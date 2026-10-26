@@ -4,22 +4,76 @@ export type KnowledgeBase = {
   id: string;
   name: string;
   description: string;
-  status: "ready" | "processing" | "warning";
-  documents: number;
-  chunks: number;
-  model: string;
+  embeddingModelId: string;
+  embeddingModelName: string;
+  vectorDimension: number;
+  chunkSize: number;
+  chunkOverlap: number;
+  status: "ready" | "rebuilding" | "rebuild_failed";
+  rebuildError: string | null;
+  documentCount: number;
+  readyDocumentCount: number;
+  processingDocumentCount: number;
+  chunkCount: number;
+  createdAt: string;
   updatedAt: string;
-  tags: string[];
 };
 
-export type DocumentItem = {
-  name: string;
-  type: string;
-  size: string;
-  chunks: number;
-  status: "ready" | "processing" | "failed";
+export type DocumentStatus =
+  | "uploaded"
+  | "parsing"
+  | "enhancing"
+  | "chunking"
+  | "embedding"
+  | "ready"
+  | "partial_failed"
+  | "failed"
+  | "cancelled";
+
+export type KnowledgeDocument = {
+  id: string;
+  knowledgeBaseId: string;
+  filename: string;
+  extension: string;
+  sizeBytes: number;
+  status: DocumentStatus;
+  errorMessage: string | null;
+  parseStrategy: "smart" | "fast";
+  enhanceImages: boolean;
+  chunkCount: number;
+  jobId: string | null;
+  jobStatus: "queued" | "running" | "succeeded" | "failed" | "cancelled" | null;
+  jobProgress: number;
+  cancelRequested: boolean;
+  createdAt: string;
   updatedAt: string;
 };
+
+export type ChunkLocation = {
+  heading_path?: string[];
+  page?: number;
+  rows?: [number, number];
+  sheet?: string;
+  source?: string;
+};
+
+export type KnowledgeChunk = {
+  id: string;
+  documentId: string;
+  position: number;
+  kind: "text" | "table" | "image";
+  content: string;
+  tokenCount: number;
+  location: ChunkLocation;
+  vectorStatus: "pending" | "indexed" | "failed";
+  edited: boolean;
+  updatedAt: string;
+};
+
+export const LOCAL_PARSE_EXTENSIONS = ["md", "csv", "xls", "xlsx"];
+export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "tiff"];
+export const ACCEPTED_EXTENSIONS = ["doc", "docx", "pdf", "md", "png", "jpg", "jpeg", "webp", "tiff", "csv", "xls", "xlsx"];
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 export type ModelProvider = {
   id: string;

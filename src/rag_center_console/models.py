@@ -139,6 +139,7 @@ class KnowledgeBase(Base):
     chunk_size: Mapped[int] = mapped_column(Integer, default=800)
     chunk_overlap: Mapped[int] = mapped_column(Integer, default=120)
     status: Mapped[str] = mapped_column(String(20), default=KnowledgeBaseStatus.READY.value)
+    rebuild_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 

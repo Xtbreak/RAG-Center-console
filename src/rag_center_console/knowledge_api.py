@@ -122,6 +122,14 @@ def _knowledge_base_reads(db: Session, bases: list[KnowledgeBase]) -> list[Knowl
             .group_by(Document.knowledge_base_id)
         ).all()
     )
+    processing = dict(
+        db.execute(
+            select(Document.knowledge_base_id, func.count(func.distinct(Document.id)))
+            .join(IngestionJob, IngestionJob.document_id == Document.id)
+            .where(Document.knowledge_base_id.in_(ids), IngestionJob.status.in_(ACTIVE_JOB_STATUSES))
+            .group_by(Document.knowledge_base_id)
+        ).all()
+    )
     chunks = dict(
         db.execute(
             select(Chunk.knowledge_base_id, func.count(Chunk.id))
@@ -140,8 +148,10 @@ def _knowledge_base_reads(db: Session, bases: list[KnowledgeBase]) -> list[Knowl
             chunk_size=kb.chunk_size,
             chunk_overlap=kb.chunk_overlap,
             status=kb.status,
+            rebuild_error=kb.rebuild_error,
             document_count=documents.get(kb.id, 0),
             ready_document_count=ready.get(kb.id, 0),
+            processing_document_count=processing.get(kb.id, 0),
             chunk_count=chunks.get(kb.id, 0),
             created_at=kb.created_at,
             updated_at=kb.updated_at,
@@ -169,6 +179,7 @@ def _document_read(document: Document) -> DocumentRead:
         job_status=job.status if job else None,
         job_stage=job.stage if job else None,
         job_progress=job.progress if job else 0,
+        cancel_requested=bool(job and job.cancel_requested),
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -249,7 +260,7 @@ def update_knowledge_base(
             raise HTTPException(status_code=409, detail="仍有文档在处理中，请等待完成或取消后再更换 Embedding 模型")
         has_chunks = bool(db.scalar(select(func.count(Chunk.id)).where(Chunk.knowledge_base_id == kb.id)))
         if has_chunks:
-            kb.status = KnowledgeBaseStatus.REBUILDING.value
+            kb.status, kb.rebuild_error = KnowledgeBaseStatus.REBUILDING.value, None
             rebuild_to = model.id
         else:
             # 空知识库无需重建：删除旧集合，下一次导入按新维度创建
@@ -258,6 +269,7 @@ def update_knowledge_base(
             except VectorStoreError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             kb.embedding_model_id, kb.vector_dimension = model.id, model.vector_dimension
+            kb.status, kb.rebuild_error = KnowledgeBaseStatus.READY.value, None
     try:
         db.commit()
     except IntegrityError as exc:
@@ -267,7 +279,7 @@ def update_knowledge_base(
         try:
             tasks.enqueue_rebuild(kb.id, rebuild_to)
         except Exception as exc:
-            kb.status = KnowledgeBaseStatus.READY.value
+            kb.status, kb.rebuild_error = KnowledgeBaseStatus.REBUILD_FAILED.value, QUEUE_UNAVAILABLE
             db.commit()
             raise HTTPException(status_code=503, detail=QUEUE_UNAVAILABLE) from exc
     db.refresh(kb)

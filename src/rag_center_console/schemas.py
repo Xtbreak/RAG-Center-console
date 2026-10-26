@@ -184,8 +184,10 @@ class KnowledgeBaseRead(BaseModel):
     chunk_size: int
     chunk_overlap: int
     status: str
+    rebuild_error: str | None
     document_count: int
     ready_document_count: int
+    processing_document_count: int
     chunk_count: int
     created_at: datetime
     updated_at: datetime
@@ -208,6 +210,7 @@ class DocumentRead(BaseModel):
     job_status: str | None
     job_stage: str | None
     job_progress: int
+    cancel_requested: bool
     created_at: datetime
     updated_at: datetime
 

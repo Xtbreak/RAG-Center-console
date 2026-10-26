@@ -105,6 +105,7 @@ class DocmindParser:
         filename: str,
         extension: str,
         should_cancel: Callable[[], bool] = lambda: False,
+        llm_enhancement: bool = True,
     ) -> ParsedDocument:
         from alibabacloud_docmind_api20220711 import models
         from darabonba.runtime import RuntimeOptions
@@ -112,7 +113,10 @@ class DocmindParser:
         try:
             submitted = self._client.submit_doc_parser_job_advance(
                 models.SubmitDocParserJobAdvanceRequest(
-                    file_url_object=io.BytesIO(data), file_name=filename, file_name_extension=extension
+                    file_url_object=io.BytesIO(data),
+                    file_name=filename,
+                    file_name_extension=extension,
+                    llm_enhancement=llm_enhancement,
                 ),
                 RuntimeOptions(),
             )

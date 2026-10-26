@@ -42,6 +42,15 @@ npm install
 npm run dev
 ```
 
+文档导入由 Celery Worker 异步处理，需要 Redis、Qdrant 和 S3 兼容对象存储（可用 `docker compose up -d postgres qdrant redis rustfs` 启动），再另开终端运行：
+
+```bash
+uv run celery -A rag_center_console.worker worker --pool=threads --loglevel=info
+uv run celery -A rag_center_console.worker beat --loglevel=info
+```
+
+Worker 必须使用 `--pool=threads`：Python 3.15 下 Celery 默认的 prefork 进程池无法执行任务。Beat 每 5 分钟把长时间无进展的导入任务重新排队。导入 PDF、Word 和图片需在 `.env` 中配置 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_ID` 和 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_SECRET`。
+
 浏览器访问 `http://localhost:3000`，API 文档位于 `http://localhost:8000/docs`。当前版本默认以零数据空状态启动，不包含预置业务示例。
 
 安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、RustFS、API 和 Web。

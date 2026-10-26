@@ -1,10 +1,19 @@
-import type { ModelInstance, ModelProvider, Role } from "./prototype-models";
+import type { KnowledgeBase, KnowledgeChunk, KnowledgeDocument, ModelInstance, ModelProvider, Role } from "./prototype-models";
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly detail?: unknown) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+function errorFromPayload(payload: unknown, status: number): ApiError {
+  let message = `请求失败（HTTP ${status}）`;
+  const detail = (payload as { detail?: unknown } | null)?.detail;
+  if (typeof detail === "string") message = detail;
+  else if (Array.isArray(detail)) message = detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join("；") || message;
+  else if (detail && typeof detail === "object" && typeof (detail as { message?: unknown }).message === "string") message = (detail as { message: string }).message;
+  return new ApiError(message, status, detail);
 }
 
 type ProviderWire = {
@@ -98,20 +107,18 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     ...init,
     credentials: "include",
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...init?.headers,
     },
   });
   if (!response.ok) {
-    let message = `请求失败（HTTP ${response.status}）`;
+    let payload: unknown = null;
     try {
-      const payload = await response.json() as { detail?: string | Array<{ msg?: string }> };
-      if (typeof payload.detail === "string") message = payload.detail;
-      if (Array.isArray(payload.detail)) message = payload.detail.map((item) => item.msg).filter(Boolean).join("；") || message;
+      payload = await response.json();
     } catch {
       // Keep the status-based fallback when an upstream service does not return JSON.
     }
-    throw new ApiError(message, response.status);
+    throw errorFromPayload(payload, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -269,4 +276,208 @@ export async function getModelDefaults(): Promise<ModelDefaults> {
 
 export async function updateModelDefaults(defaults: ModelDefaults): Promise<ModelDefaults> {
   return apiRequest("/model-defaults", { method: "PUT", body: JSON.stringify(defaults) });
+}
+
+type KnowledgeBaseWire = {
+  id: string;
+  name: string;
+  description: string;
+  embedding_model_id: string;
+  embedding_model_name: string;
+  vector_dimension: number;
+  chunk_size: number;
+  chunk_overlap: number;
+  status: KnowledgeBase["status"];
+  rebuild_error: string | null;
+  document_count: number;
+  ready_document_count: number;
+  processing_document_count: number;
+  chunk_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type DocumentWire = {
+  id: string;
+  knowledge_base_id: string;
+  filename: string;
+  extension: string;
+  size_bytes: number;
+  status: KnowledgeDocument["status"];
+  error_message: string | null;
+  parse_strategy: KnowledgeDocument["parseStrategy"];
+  enhance_images: boolean;
+  chunk_count: number;
+  job_id: string | null;
+  job_status: KnowledgeDocument["jobStatus"];
+  job_progress: number;
+  cancel_requested: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type ChunkWire = {
+  id: string;
+  document_id: string;
+  position: number;
+  kind: KnowledgeChunk["kind"];
+  content: string;
+  token_count: number;
+  location: KnowledgeChunk["location"];
+  vector_status: KnowledgeChunk["vectorStatus"];
+  edited: boolean;
+  updated_at: string;
+};
+
+export type KnowledgeBaseInput = {
+  name: string;
+  description: string;
+  embeddingModelId: string;
+  chunkSize: number;
+  chunkOverlap: number;
+};
+
+export type DuplicateDocument = { id: string; filename: string; created_at: string };
+
+function mapKnowledgeBase(kb: KnowledgeBaseWire): KnowledgeBase {
+  return {
+    id: kb.id,
+    name: kb.name,
+    description: kb.description,
+    embeddingModelId: kb.embedding_model_id,
+    embeddingModelName: kb.embedding_model_name,
+    vectorDimension: kb.vector_dimension,
+    chunkSize: kb.chunk_size,
+    chunkOverlap: kb.chunk_overlap,
+    status: kb.status,
+    rebuildError: kb.rebuild_error,
+    documentCount: kb.document_count,
+    readyDocumentCount: kb.ready_document_count,
+    processingDocumentCount: kb.processing_document_count,
+    chunkCount: kb.chunk_count,
+    createdAt: kb.created_at,
+    updatedAt: kb.updated_at,
+  };
+}
+
+function mapDocument(document: DocumentWire): KnowledgeDocument {
+  return {
+    id: document.id,
+    knowledgeBaseId: document.knowledge_base_id,
+    filename: document.filename,
+    extension: document.extension,
+    sizeBytes: document.size_bytes,
+    status: document.status,
+    errorMessage: document.error_message,
+    parseStrategy: document.parse_strategy,
+    enhanceImages: document.enhance_images,
+    chunkCount: document.chunk_count,
+    jobId: document.job_id,
+    jobStatus: document.job_status,
+    jobProgress: document.job_progress,
+    cancelRequested: document.cancel_requested,
+    createdAt: document.created_at,
+    updatedAt: document.updated_at,
+  };
+}
+
+function mapChunk(chunk: ChunkWire): KnowledgeChunk {
+  return {
+    id: chunk.id,
+    documentId: chunk.document_id,
+    position: chunk.position,
+    kind: chunk.kind,
+    content: chunk.content,
+    tokenCount: chunk.token_count,
+    location: chunk.location ?? {},
+    vectorStatus: chunk.vector_status,
+    edited: chunk.edited,
+    updatedAt: chunk.updated_at,
+  };
+}
+
+function knowledgeBaseBody(input: Partial<KnowledgeBaseInput>) {
+  const body: Record<string, unknown> = {};
+  if (input.name !== undefined) body.name = input.name;
+  if (input.description !== undefined) body.description = input.description;
+  if (input.embeddingModelId !== undefined) body.embedding_model_id = input.embeddingModelId;
+  if (input.chunkSize !== undefined) body.chunk_size = input.chunkSize;
+  if (input.chunkOverlap !== undefined) body.chunk_overlap = input.chunkOverlap;
+  return JSON.stringify(body);
+}
+
+export async function listKnowledgeBases(): Promise<KnowledgeBase[]> {
+  return (await apiRequest<KnowledgeBaseWire[]>("/knowledge-bases")).map(mapKnowledgeBase);
+}
+
+export async function createKnowledgeBase(input: KnowledgeBaseInput): Promise<KnowledgeBase> {
+  return mapKnowledgeBase(await apiRequest<KnowledgeBaseWire>("/knowledge-bases", { method: "POST", body: knowledgeBaseBody(input) }));
+}
+
+export async function updateKnowledgeBase(id: string, input: Partial<KnowledgeBaseInput>): Promise<KnowledgeBase> {
+  return mapKnowledgeBase(await apiRequest<KnowledgeBaseWire>(`/knowledge-bases/${id}`, { method: "PATCH", body: knowledgeBaseBody(input) }));
+}
+
+export async function deleteKnowledgeBase(id: string): Promise<void> {
+  return apiRequest(`/knowledge-bases/${id}`, { method: "DELETE" });
+}
+
+export async function listDocuments(knowledgeBaseId: string): Promise<KnowledgeDocument[]> {
+  return (await apiRequest<DocumentWire[]>(`/knowledge-bases/${knowledgeBaseId}/documents`)).map(mapDocument);
+}
+
+/** 使用 XMLHttpRequest 上传以获得上传进度；fetch 目前无法报告请求体发送进度。 */
+export function uploadDocument(
+  knowledgeBaseId: string,
+  file: File,
+  options: { parseStrategy: KnowledgeDocument["parseStrategy"]; enhanceImages: boolean; allowDuplicate: boolean },
+  onProgress?: (fraction: number) => void,
+): Promise<KnowledgeDocument> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("parse_strategy", options.parseStrategy);
+  form.append("enhance_images", String(options.enhanceImages));
+  form.append("allow_duplicate", String(options.allowDuplicate));
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", `/api/v1/knowledge-bases/${knowledgeBaseId}/documents`);
+    request.withCredentials = true;
+    request.responseType = "json";
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded / event.total);
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) resolve(mapDocument(request.response as DocumentWire));
+      else reject(errorFromPayload(request.response, request.status));
+    };
+    request.onerror = () => reject(new ApiError("网络错误，文件未能上传", 0));
+    request.send(form);
+  });
+}
+
+export async function retryDocument(id: string): Promise<KnowledgeDocument> {
+  return mapDocument(await apiRequest<DocumentWire>(`/documents/${id}/retry`, { method: "POST" }));
+}
+
+export async function cancelDocument(id: string): Promise<KnowledgeDocument> {
+  return mapDocument(await apiRequest<DocumentWire>(`/documents/${id}/cancel`, { method: "POST" }));
+}
+
+export async function deleteDocument(id: string): Promise<void> {
+  return apiRequest(`/documents/${id}`, { method: "DELETE" });
+}
+
+export async function listChunks(
+  knowledgeBaseId: string,
+  query: { documentId?: string; q?: string; offset: number; limit: number },
+): Promise<{ items: KnowledgeChunk[]; total: number }> {
+  const params = new URLSearchParams({ offset: String(query.offset), limit: String(query.limit) });
+  if (query.documentId) params.set("document_id", query.documentId);
+  if (query.q?.trim()) params.set("q", query.q.trim());
+  const page = await apiRequest<{ items: ChunkWire[]; total: number }>(`/knowledge-bases/${knowledgeBaseId}/chunks?${params}`);
+  return { items: page.items.map(mapChunk), total: page.total };
+}
+
+export async function updateChunk(id: string, content: string): Promise<KnowledgeChunk> {
+  return mapChunk(await apiRequest<ChunkWire>(`/chunks/${id}`, { method: "PATCH", body: JSON.stringify({ content }) }));
 }

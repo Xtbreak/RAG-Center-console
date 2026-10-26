@@ -58,14 +58,19 @@ class Harness:
         self.parsed = ParsedDocument([Element("paragraph", "云端解析的正文", page=1)])
         self.described = []
         self.describe_error = None
+        self.parse_calls = []
         self.services = PipelineServices(
             storage=self.storage,
             vector_store=self.vectors,
             secret_box=get_secret_box(),
-            parser_factory=lambda: type("P", (), {"parse": lambda _, data, name, ext, should_cancel: self.parsed})(),
+            parser_factory=lambda: type("P", (), {"parse": self._parse})(),
             embed=self._embed,
             describe=self._describe,
         )
+
+    def _parse(self, data, name, ext, should_cancel, llm_enhancement):
+        self.parse_calls.append((name, llm_enhancement))
+        return self.parsed
 
     def _embed(self, target, texts, dimension):
         self.embed_calls.append((target.model_id, list(texts), dimension))
@@ -235,6 +240,7 @@ def test_cloud_image_gets_vision_description_when_model_is_configured(h):
     run(h, job_id)
     document, _, chunks = state(document_id)
     assert document.status == "ready" and h.described == [("vision-1", "image/png")]
+    assert h.parse_calls == [("chart.png", True)]  # 默认智能解析开启大模型增强
     assert [c.kind for c in chunks] == ["text", "image"] and "一张折线图" in chunks[1].content
 
 
@@ -290,6 +296,7 @@ def test_rebuild_switches_to_new_collection_only_after_full_success(h):
     with SessionLocal() as db:
         kb = db.get(KnowledgeBase, kb_id)
         assert (kb.status, kb.embedding_model_id, kb.vector_dimension, kb.collection_name) == ("ready", new_id, 6, collection_name(kb_id, 2))
+        assert kb.rebuild_error is None
         assert h.vectors.count(kb.collection_name) == kb.documents[0].chunk_count
     assert not h.vectors._client.collection_exists(old)
     assert h.embed_calls[-1][2] == 6
@@ -307,6 +314,7 @@ def test_failed_rebuild_keeps_old_index_and_marks_the_knowledge_base(h):
     with SessionLocal() as db:
         kb = db.get(KnowledgeBase, kb_id)
         assert (kb.status, kb.collection_name, kb.vector_dimension) == ("rebuild_failed", collection_name(kb_id), 4)
+        assert kb.rebuild_error == "额度不足"
     assert h.vectors.count(collection_name(kb_id)) > 0
     assert not h.vectors._client.collection_exists(collection_name(kb_id, 2))
 
