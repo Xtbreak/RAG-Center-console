@@ -39,6 +39,19 @@ def test_upsert_is_idempotent_per_point_id(store):
     assert store.count("kb") == 2
 
 
+def test_search_returns_ranked_payloads(store):
+    store.ensure_collection("kb", 2)
+    store.upsert("kb", points("d1", 3))
+    matches = store.search("kb", [1.0, 0.0], limit=2)
+    assert len(matches) == 2
+    assert matches[0].payload["document_id"] == "d1"
+    assert matches[0].score >= matches[1].score
+
+
+def test_search_missing_collection_is_empty(store):
+    assert store.search("missing", [1.0, 0.0]) == []
+
+
 def test_ensure_collection_detects_dimension_mismatch(store):
     store.ensure_collection("kb", 2)
     store.ensure_collection("kb", 2)  # 重复调用安全

@@ -1,4 +1,19 @@
-import type { ChunkMethod, KnowledgeBase, KnowledgeChunk, KnowledgeDocument, ModelInstance, ModelProvider, Role } from "./prototype-models";
+import type {
+  ChatCitation,
+  ChatMessage,
+  ChatRouteSelection,
+  ChunkMethod,
+  ConversationDetail,
+  ConversationSummary,
+  KnowledgeBase,
+  KnowledgeChunk,
+  KnowledgeDocument,
+  ModelInstance,
+  ModelProvider,
+  RetrievalHit,
+  RetrievalTestResult,
+  Role,
+} from "./prototype-models";
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly detail?: unknown) {
@@ -282,6 +297,8 @@ type KnowledgeBaseWire = {
   id: string;
   name: string;
   description: string;
+  tags: string[];
+  sample_questions: string[];
   embedding_model_id: string;
   embedding_model_name: string;
   vector_dimension: number;
@@ -345,6 +362,8 @@ export type ChunkSettings = {
 export type KnowledgeBaseInput = ChunkSettings & {
   name: string;
   description: string;
+  tags: string[];
+  sampleQuestions: string[];
   embeddingModelId: string;
 };
 
@@ -355,6 +374,8 @@ function mapKnowledgeBase(kb: KnowledgeBaseWire): KnowledgeBase {
     id: kb.id,
     name: kb.name,
     description: kb.description,
+    tags: kb.tags,
+    sampleQuestions: kb.sample_questions,
     embeddingModelId: kb.embedding_model_id,
     embeddingModelName: kb.embedding_model_name,
     vectorDimension: kb.vector_dimension,
@@ -417,6 +438,8 @@ function knowledgeBaseBody(input: Partial<KnowledgeBaseInput>) {
   const body: Record<string, unknown> = {};
   if (input.name !== undefined) body.name = input.name;
   if (input.description !== undefined) body.description = input.description;
+  if (input.tags !== undefined) body.tags = input.tags;
+  if (input.sampleQuestions !== undefined) body.sample_questions = input.sampleQuestions;
   if (input.embeddingModelId !== undefined) body.embedding_model_id = input.embeddingModelId;
   if (input.chunkSize !== undefined) body.chunk_size = input.chunkSize;
   if (input.chunkOverlap !== undefined) body.chunk_overlap = input.chunkOverlap;
@@ -503,4 +526,220 @@ export async function listChunks(
 
 export async function updateChunk(id: string, content: string): Promise<KnowledgeChunk> {
   return mapChunk(await apiRequest<ChunkWire>(`/chunks/${id}`, { method: "PATCH", body: JSON.stringify({ content }) }));
+}
+
+type RouteSelectionWire = {
+  knowledge_base_id: string;
+  name: string;
+  score: number;
+  reason: string;
+};
+
+type CitationWire = {
+  index: number;
+  chunk_id: string;
+  knowledge_base_id: string;
+  knowledge_base_name: string;
+  document_id: string;
+  filename: string;
+  content: string;
+  location: ChatCitation["location"];
+};
+
+type ChatMessageWire = {
+  id: string;
+  role: ChatMessage["role"];
+  content: string;
+  citations: CitationWire[];
+  route: RouteSelectionWire[];
+  status: string;
+  error_message: string | null;
+  created_at: string;
+};
+
+type ConversationWire = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type RetrievalHitWire = {
+  chunk_id: string;
+  knowledge_base_id: string;
+  knowledge_base_name: string;
+  document_id: string;
+  filename: string;
+  position: number;
+  kind: RetrievalHit["kind"];
+  content: string;
+  location: RetrievalHit["location"];
+  dense_score: number;
+  bm25_score: number;
+  rrf_score: number;
+  rerank_score: number | null;
+};
+
+function mapRouteSelection(item: RouteSelectionWire): ChatRouteSelection {
+  return {
+    knowledgeBaseId: item.knowledge_base_id,
+    name: item.name,
+    score: item.score,
+    reason: item.reason,
+  };
+}
+
+function mapCitation(item: CitationWire): ChatCitation {
+  return {
+    index: item.index,
+    chunkId: item.chunk_id,
+    knowledgeBaseId: item.knowledge_base_id,
+    knowledgeBaseName: item.knowledge_base_name,
+    documentId: item.document_id,
+    filename: item.filename,
+    content: item.content,
+    location: item.location ?? {},
+  };
+}
+
+function mapChatMessage(item: ChatMessageWire): ChatMessage {
+  return {
+    id: item.id,
+    role: item.role,
+    content: item.content,
+    citations: (item.citations ?? []).map(mapCitation),
+    route: (item.route ?? []).map(mapRouteSelection),
+    status: item.status,
+    errorMessage: item.error_message,
+    createdAt: item.created_at,
+  };
+}
+
+function mapConversation(item: ConversationWire): ConversationSummary {
+  return { id: item.id, title: item.title, createdAt: item.created_at, updatedAt: item.updated_at };
+}
+
+export async function listConversations(): Promise<ConversationSummary[]> {
+  return (await apiRequest<ConversationWire[]>("/conversations")).map(mapConversation);
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  const item = await apiRequest<ConversationWire & { messages: ChatMessageWire[] }>(`/conversations/${id}`);
+  return { ...mapConversation(item), messages: item.messages.map(mapChatMessage) };
+}
+
+export async function testRetrieval(query: string, topK: number): Promise<RetrievalTestResult> {
+  const result = await apiRequest<{
+    query: string;
+    selected_knowledge_bases: RouteSelectionWire[];
+    hits: RetrievalHitWire[];
+    insufficient: boolean;
+    rerank_applied: boolean;
+    warnings: string[];
+  }>("/retrieval/test", { method: "POST", body: JSON.stringify({ query, top_k: topK }) });
+  return {
+    query: result.query,
+    selectedKnowledgeBases: result.selected_knowledge_bases.map(mapRouteSelection),
+    hits: result.hits.map((item) => ({
+      chunkId: item.chunk_id,
+      knowledgeBaseId: item.knowledge_base_id,
+      knowledgeBaseName: item.knowledge_base_name,
+      documentId: item.document_id,
+      filename: item.filename,
+      position: item.position,
+      kind: item.kind,
+      content: item.content,
+      location: item.location ?? {},
+      denseScore: item.dense_score,
+      bm25Score: item.bm25_score,
+      rrfScore: item.rrf_score,
+      rerankScore: item.rerank_score,
+    })),
+    insufficient: result.insufficient,
+    rerankApplied: result.rerank_applied,
+    warnings: result.warnings,
+  };
+}
+
+export type ChatStreamEvent =
+  | { event: "conversation"; data: { conversationId: string; title: string } }
+  | { event: "stage"; data: { name: string; label: string } }
+  | { event: "routing"; data: { selected: ChatRouteSelection[] } }
+  | { event: "warning"; data: { message: string } }
+  | { event: "citations"; data: { items: ChatCitation[] } }
+  | { event: "delta"; data: { text: string } }
+  | { event: "complete"; data: { answer: string; citations: ChatCitation[]; route: ChatRouteSelection[]; grounded: boolean } }
+  | { event: "done"; data: { messageId: string; grounded: boolean } }
+  | { event: "error"; data: { message: string } };
+
+function parseSseBlock(block: string): { event: ChatStreamEvent["event"]; data: unknown } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (!dataLines.length) return null;
+  return { event: event as ChatStreamEvent["event"], data: JSON.parse(dataLines.join("\n")) };
+}
+
+function normalizeChatStreamEvent(raw: { event: ChatStreamEvent["event"]; data: unknown }): ChatStreamEvent {
+  const data = raw.data as Record<string, unknown>;
+  if (raw.event === "conversation") return { event: raw.event, data: { conversationId: String(data.conversation_id), title: String(data.title) } };
+  if (raw.event === "routing") return { event: raw.event, data: { selected: ((data.selected as RouteSelectionWire[]) ?? []).map(mapRouteSelection) } };
+  if (raw.event === "citations") return { event: raw.event, data: { items: ((data.items as CitationWire[]) ?? []).map(mapCitation) } };
+  if (raw.event === "complete") return {
+    event: raw.event,
+    data: {
+      answer: String(data.answer ?? ""),
+      citations: ((data.citations as CitationWire[]) ?? []).map(mapCitation),
+      route: ((data.route as RouteSelectionWire[]) ?? []).map(mapRouteSelection),
+      grounded: Boolean(data.grounded),
+    },
+  };
+  if (raw.event === "done") return { event: raw.event, data: { messageId: String(data.message_id), grounded: Boolean(data.grounded) } };
+  if (raw.event === "stage") return { event: raw.event, data: { name: String(data.name), label: String(data.label) } };
+  if (raw.event === "warning" || raw.event === "error") return { event: raw.event, data: { message: String(data.message) } };
+  return { event: "delta", data: { text: String(data.text ?? "") } };
+}
+
+export async function streamChat(
+  input: { question: string; conversationId: string | null },
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch("/api/v1/chat/stream", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ question: input.question, conversation_id: input.conversationId }),
+    signal,
+  });
+  if (!response.ok) {
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      // Keep the status-based fallback when the upstream does not return JSON.
+    }
+    throw errorFromPayload(payload, response.status);
+  }
+  if (!response.body) throw new ApiError("浏览器未收到流式回答", 0);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done }).replaceAll("\r\n", "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const parsed = parseSseBlock(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      if (parsed) onEvent(normalizeChatStreamEvent(parsed));
+      boundary = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  const parsed = parseSseBlock(buffer.trim());
+  if (parsed) onEvent(normalizeChatStreamEvent(parsed));
 }

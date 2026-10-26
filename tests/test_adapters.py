@@ -10,8 +10,11 @@ from rag_center_console.adapters import (
     describe_image,
     discover_models,
     embed_texts,
+    generate_text,
     infer_model_type,
     probe_model,
+    rerank_texts,
+    stream_text,
 )
 from rag_center_console.models import ModelType, ProviderHealth
 
@@ -117,6 +120,110 @@ async def test_provider_error_does_not_echo_api_key():
     assert "top-secret" not in str(exc_info.value)
     assert "invalid credentials" in str(exc_info.value)
     assert "[REDACTED]" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "expected_path", "response", "expected_system_key"),
+    [
+        (
+            "OpenAI Chat Completions",
+            "/v1/chat/completions",
+            {"choices": [{"message": {"content": '{"selected_ids": ["kb-1"]}'}}], "usage": {"total_tokens": 8}},
+            None,
+        ),
+        (
+            "OpenAI Responses",
+            "/v1/responses",
+            {"output_text": '{"selected_ids": ["kb-1"]}', "usage": {"total_tokens": 8}},
+            "instructions",
+        ),
+        (
+            "Anthropic Messages",
+            "/v1/messages",
+            {"content": [{"type": "text", "text": '{"selected_ids": ["kb-1"]}'}], "usage": {"input_tokens": 5}},
+            "system",
+        ),
+    ],
+)
+async def test_generate_text_contracts(protocol, expected_path, response, expected_system_key):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=response)
+
+    target = ProbeTarget("p", "custom", "https://provider.test/v1", "secret", "chat-model", protocol, 3)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await generate_text(
+            target,
+            [{"role": "system", "content": "route"}, {"role": "user", "content": "question"}],
+            json_mode=True,
+            client=client,
+        )
+
+    assert seen["path"] == expected_path
+    assert result.text == '{"selected_ids": ["kb-1"]}'
+    assert result.usage is not None
+    if expected_system_key:
+        assert seen["body"][expected_system_key] == "route"
+    else:
+        assert seen["body"]["messages"][0]["role"] == "system"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "expected_path", "response"),
+    [
+        ("Cohere Rerank", "/v1/rerank", {"results": [{"index": 1, "relevance_score": 0.9}]}),
+        (
+            "DashScope Rerank",
+            "/api/v1/services/rerank/text-rerank/text-rerank",
+            {"output": {"results": [{"index": 1, "score": 0.9}]}},
+        ),
+    ],
+)
+async def test_rerank_contracts(protocol, expected_path, response):
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=response)
+
+    target = ProbeTarget("p", "custom", "https://provider.test/v1", "secret", "reranker", protocol, 3)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await rerank_texts(target, "政策", ["无关", "政策正文"], top_n=1, client=client)
+
+    assert seen["path"] == expected_path
+    assert [(item.index, item.score) for item in result.items] == [(1, 0.9)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "events", "expected"),
+    [
+        ("OpenAI Chat Completions", [{"choices": [{"delta": {"content": "答案"}}]}], "答案"),
+        ("OpenAI Responses", [{"type": "response.output_text.delta", "delta": "答案"}], "答案"),
+        (
+            "Anthropic Messages",
+            [{"type": "content_block_delta", "delta": {"type": "text_delta", "text": "答案"}}],
+            "答案",
+        ),
+    ],
+)
+async def test_stream_text_normalizes_provider_events(protocol, events, expected):
+    def handler(_: httpx.Request) -> httpx.Response:
+        body = "".join(f"data: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body)
+
+    target = ProbeTarget("p", "custom", "https://provider.test/v1", "secret", "chat-model", protocol, 3)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        chunks = [chunk async for chunk in stream_text(
+            target, [{"role": "user", "content": "问题"}], client=client
+        )]
+    assert "".join(chunks) == expected
 
 
 @pytest.mark.asyncio

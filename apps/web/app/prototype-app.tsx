@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ChatView } from "./chat-view";
 import { KnowledgeView } from "./knowledge-views";
 import {
   checkProvider,
@@ -330,7 +331,7 @@ export function PrototypeApp() {
 
           {activeView === "overview" ? <OverviewView navigate={navigate} knowledgeBaseCount={knowledgeBases.length} chunkCount={chunkCount} processingDocumentCount={processingDocumentCount} providerCount={modelProviders.length} /> : null}
           {activeView === "knowledge" ? <KnowledgeView selectedId={selectedKb} router={router} role={role} setToast={setToast} knowledgeBases={knowledgeBases} loaded={knowledgeBasesLoaded} loadError={knowledgeBasesError} refreshKnowledgeBases={refreshKnowledgeBases} /> : null}
-          {activeView === "chat" ? <ChatView navigate={navigate} role={role} hasKnowledgeBase={knowledgeBases.length > 0} readyForChat={knowledgeBases.some((kb) => kb.readyDocumentCount > 0)} /> : null}
+          {activeView === "chat" ? <ChatView navigate={navigate} role={role} hasKnowledgeBase={knowledgeBases.length > 0} readyForChat={knowledgeBases.some((kb) => kb.readyDocumentCount > 0)} sessionReady={roleReady} /> : null}
           {activeView === "models" ? <ModelsView setToast={setToast} setWarningToast={setWarningToast} setErrorToast={setErrorToast} providers={modelProviders} setProviders={setModelProviders} /> : null}
           {activeView === "logs" ? <LogsView /> : null}
         </main>
@@ -381,17 +382,6 @@ function OverviewView({ navigate, knowledgeBaseCount, chunkCount, processingDocu
       <section className="panel">
         <div className="panel-heading compact"><div><h2>最近问答</h2><p>包含自动选库和端到端耗时</p></div></div>
         <EmptyState compact icon={MessageCircle} title="暂无问答记录" description="完成首次在线问答后，调用摘要会显示在这里。" />
-      </section>
-    </div>
-  );
-}
-
-function ChatView({ navigate, role, hasKnowledgeBase, readyForChat }: { navigate: (view: ViewKey) => void; role: Role; hasKnowledgeBase: boolean; readyForChat: boolean }) {
-  return (
-    <div className="chat-layout chat-layout-empty">
-      <section className="chat-panel">
-        <div className="chat-empty"><div className="chat-orbit"><Sparkles size={24} /></div><h2>{readyForChat ? "知识库已就绪" : hasKnowledgeBase ? "知识库还没有可检索内容" : "还没有可用于问答的知识库"}</h2><p>{readyForChat ? "在线问答将在接入自动选库与混合检索后开放（开发阶段 4）。" : hasKnowledgeBase ? "文档完成解析和向量化后，即可开始在线对话。" : role === "user" ? "请联系知识库管理人员创建知识库并导入资料。" : "先创建知识库并导入企业资料，系统才能自动选库并生成带引用的回答。"}</p>{role !== "user" ? <Button variant="primary" icon={Database} onClick={() => navigate("knowledge")}>{hasKnowledgeBase ? "查看知识库" : "创建知识库"}</Button> : null}</div>
-        <div className="composer composer-disabled"><label htmlFor="chat-input" className="sr-only">输入问题</label><textarea id="chat-input" disabled placeholder={readyForChat ? "在线问答将在开发阶段 4 开放" : "知识库可检索后开放输入"} /><div className="composer-footer"><span><Sparkles size={14} />全库自动路由</span><button disabled aria-label="发送问题"><ArrowRight size={18} /></button></div></div>
       </section>
     </div>
   );

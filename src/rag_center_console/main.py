@@ -5,9 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import models  # noqa: F401
 from .api import router
+from .chat_api import router as chat_router
 from .config import get_settings
 from .database import Base, engine
 from .knowledge_api import router as knowledge_router
+from .retrieval_api import router as retrieval_router
 
 
 settings = get_settings()
@@ -30,6 +32,8 @@ app.add_middleware(
 )
 app.include_router(router, prefix=settings.api_prefix)
 app.include_router(knowledge_router, prefix=settings.api_prefix)
+app.include_router(retrieval_router, prefix=settings.api_prefix)
+app.include_router(chat_router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

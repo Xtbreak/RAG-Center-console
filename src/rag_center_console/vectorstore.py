@@ -19,6 +19,13 @@ class VectorPoint:
     payload: dict[str, Any]
 
 
+@dataclass(slots=True)
+class VectorMatch:
+    id: str
+    score: float
+    payload: dict[str, Any]
+
+
 def collection_name(knowledge_base_id: str, generation: int = 1) -> str:
     """每个知识库独立 collection；整库重建时递增 generation 写入新集合，成功后再切换。"""
     base = f"kb_{knowledge_base_id.replace('-', '')}"
@@ -86,6 +93,27 @@ class VectorStore:
             self._client.delete_collection(name)
         except Exception as exc:
             raise VectorStoreError("删除向量集合失败") from exc
+
+    def search(
+        self, name: str, vector: list[float], *, limit: int = 20, score_threshold: float | None = None
+    ) -> list[VectorMatch]:
+        try:
+            if not self._client.collection_exists(name):
+                return []
+            response = self._client.query_points(
+                name,
+                query=vector,
+                limit=min(max(limit, 1), 100),
+                score_threshold=score_threshold,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return [
+                VectorMatch(id=str(point.id), score=float(point.score), payload=dict(point.payload or {}))
+                for point in response.points
+            ]
+        except Exception as exc:
+            raise VectorStoreError("检索向量库失败") from exc
 
     def count(self, name: str) -> int:
         try:

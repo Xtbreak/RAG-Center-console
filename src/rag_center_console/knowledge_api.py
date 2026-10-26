@@ -142,6 +142,8 @@ def _knowledge_base_reads(db: Session, bases: list[KnowledgeBase]) -> list[Knowl
             id=kb.id,
             name=kb.name,
             description=kb.description,
+            tags=kb.tags or [],
+            sample_questions=kb.sample_questions or [],
             embedding_model_id=kb.embedding_model_id,
             embedding_model_name=kb.embedding_model.name,
             vector_dimension=kb.vector_dimension,
@@ -217,6 +219,8 @@ def create_knowledge_base(
         id=knowledge_base_id,
         name=payload.name.strip(),
         description=payload.description.strip(),
+        tags=payload.tags,
+        sample_questions=payload.sample_questions,
         embedding_model_id=model.id,
         vector_dimension=model.vector_dimension,
         collection_name=collection_name(knowledge_base_id),
@@ -253,6 +257,7 @@ def update_knowledge_base(
     kb = _knowledge_base_or_404(db, knowledge_base_id)
     _ensure_not_rebuilding(kb)
     changes = payload.model_dump(exclude_unset=True)
+    route_profile_changed = bool({"name", "description", "tags", "sample_questions"} & changes.keys())
     size = changes.get("chunk_size", kb.chunk_size)
     overlap = changes.get("chunk_overlap", kb.chunk_overlap)
     if overlap >= size:
@@ -260,6 +265,8 @@ def update_knowledge_base(
     new_model_id = changes.pop("embedding_model_id", None)
     for key, value in changes.items():
         setattr(kb, key, value.strip() if isinstance(value, str) else value)
+    if route_profile_changed and kb.route_index is not None:
+        db.delete(kb.route_index)
 
     rebuild_to: str | None = None
     if new_model_id and new_model_id != kb.embedding_model_id:

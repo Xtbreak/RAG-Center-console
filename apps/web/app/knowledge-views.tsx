@@ -34,6 +34,7 @@ import {
   listDocuments,
   listModels,
   retryDocument,
+  testRetrieval,
   updateChunk,
   updateKnowledgeBase,
   uploadDocument,
@@ -51,6 +52,7 @@ import {
   type KnowledgeChunk,
   type KnowledgeDocument,
   type ModelInstance,
+  type RetrievalTestResult,
   type Role,
 } from "./prototype-models";
 import { Button, EmptyState, Modal, StatusBadge, cn } from "./ui";
@@ -146,6 +148,26 @@ function parseChunkForm(form: ChunkForm): { settings: ChunkSettings; error: stri
     : !Number.isInteger(settings.chunkOverlap) || settings.chunkOverlap < 0 || settings.chunkOverlap > 1000 ? "分段重叠需为 0–1000 的整数"
     : settings.chunkOverlap >= settings.chunkSize ? "分段重叠必须小于分段大小" : null;
   return { settings, error };
+}
+
+function parseTags(value: string) {
+  return [...new Set(value.split(/[，,\n]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function parseSampleQuestions(value: string) {
+  return [...new Set(value.split("\n").map((item) => item.trim()).filter(Boolean))];
+}
+
+function routeFieldError(tags: string[], sampleQuestions: string[]) {
+  if (tags.length > 20) return "标签最多填写 20 个";
+  if (tags.some((item) => item.length > 50)) return "单个标签不能超过 50 个字符";
+  if (sampleQuestions.length > 20) return "示例问题最多填写 20 个";
+  if (sampleQuestions.some((item) => item.length > 300)) return "单个示例问题不能超过 300 个字符";
+  return null;
+}
+
+function sameStrings(left: string[], right: string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 export function describeChunkSettings(settings: ChunkSettings) {
@@ -310,6 +332,7 @@ function KnowledgeDetail({ kb, router, refreshKnowledgeBases, setToast }: { kb: 
         <div className="kb-hero-copy">
           <div className="title-line"><h2>{kb.name}</h2><StatusBadge status={status.tone}>{status.label}</StatusBadge></div>
           <p>{kb.description || "未填写说明"}</p>
+          {kb.tags.length ? <div className="kb-route-tags" aria-label="知识库标签">{kb.tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
           <div className="meta-line"><span>{kb.documentCount} 个文档</span><span>{kb.chunkCount.toLocaleString()} 个分段</span><span>{kb.embeddingModelName} · {kb.vectorDimension} 维</span></div>
         </div>
         <Button variant="primary" icon={UploadCloud} onClick={() => setImportOpen(true)} disabled={rebuilding}>导入知识</Button>
@@ -523,17 +546,56 @@ function ChunksPanel({ kb, documents }: { kb: KnowledgeBase; documents: Knowledg
 
 function RetrievalPanel({ hasDocuments }: { hasDocuments: boolean }) {
   const [query, setQuery] = useState("");
+  const [topK, setTopK] = useState(8);
+  const [result, setResult] = useState<RetrievalTestResult | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    try {
+      setResult(await testRetrieval(query.trim(), topK));
+    } catch (reason) {
+      setError(errorMessage(reason, "检索测试失败"));
+    } finally {
+      setRunning(false);
+    }
+  };
+
   return (
     <div className="retrieval-layout">
-      <section className="panel retrieval-query"><h2>测试当前知识库</h2><p>查看向量召回、关键词命中和重排结果。</p><label htmlFor="retrieval-query">测试问题</label><textarea id="retrieval-query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入用于验证检索效果的问题" /><div className="form-row"><label><span>召回数量</span><select defaultValue="20"><option>20</option><option>40</option></select></label><label><span>最终引用</span><select defaultValue="5"><option>5</option><option>8</option></select></label></div><Button variant="primary" icon={Zap} disabled>开始检索</Button><p className="form-hint">{hasDocuments ? "检索测试将在阶段 4 接入混合检索后开放。" : "知识库中暂无可检索文档。"}</p></section>
-      <section className="panel retrieval-results"><div className="panel-heading compact"><div><h2>召回结果</h2><p>检索完成后显示融合和重排结果</p></div></div><EmptyState compact icon={Search} title="暂无检索结果" description="添加可用文档并输入测试问题后开始检索。" /></section>
+      <section className="panel retrieval-query">
+        <h2>测试自动选库与混合检索</h2><p>按正式问答链路执行候选库召回、每库向量查询、BM25、RRF 和可选 Rerank。</p>
+        <label htmlFor="retrieval-query">测试问题</label><textarea id="retrieval-query" value={query} maxLength={2000} onChange={(event) => setQuery(event.target.value)} placeholder="输入用于验证检索效果的问题" />
+        <label><span>返回分段</span><select value={topK} onChange={(event) => setTopK(Number(event.target.value))}><option value={5}>5</option><option value={8}>8</option><option value={12}>12</option><option value={20}>20</option></select></label>
+        <Button variant="primary" icon={Zap} onClick={() => void run()} disabled={!hasDocuments || !query.trim() || running}>{running ? "检索中…" : "开始检索"}</Button>
+        <p className="form-hint">{hasDocuments ? "该测试使用全库自动路由，结果不限定在当前知识库。" : "当前还没有可检索文档。"}</p>
+        {error ? <InlineAlert title="检索测试失败">{error}</InlineAlert> : null}
+      </section>
+      <section className="panel retrieval-results">
+        <div className="panel-heading compact"><div><h2>召回结果</h2><p>{result ? `命中 ${result.hits.length} 个分段${result.rerankApplied ? "，已执行重排" : ""}` : "检索完成后显示融合和重排结果"}</p></div></div>
+        {running ? <div className="loading-panel" role="status">正在自动选库并检索…</div> : null}
+        {result?.selectedKnowledgeBases.length ? <div className="retrieval-route"><strong>自动选库</strong><div>{result.selectedKnowledgeBases.map((item) => <span key={item.knowledgeBaseId}>{item.name} · 匹配 {item.score.toFixed(3)}</span>)}</div></div> : null}
+        {result?.warnings.map((warning) => <div className="panel-alert" key={warning}><InlineAlert tone="warning">{warning}</InlineAlert></div>)}
+        {result && result.insufficient ? <EmptyState compact icon={Search} title="未检索到充分依据" description="可调整问题、补充知识库路由信息，或导入相关资料后重试。" /> : null}
+        {result && !result.insufficient ? <div className="retrieval-hit-list">{result.hits.map((hit, index) => <article key={hit.chunkId} className="retrieval-hit"><div><span>[{index + 1}]</span><strong>{hit.filename}</strong><small>{hit.knowledgeBaseName}</small></div><p>{hit.content}</p><dl><div><dt>Dense</dt><dd>{hit.denseScore.toFixed(3)}</dd></div><div><dt>BM25</dt><dd>{hit.bm25Score.toFixed(3)}</dd></div><div><dt>RRF</dt><dd>{hit.rrfScore.toFixed(3)}</dd></div>{hit.rerankScore !== null ? <div><dt>Rerank</dt><dd>{hit.rerankScore.toFixed(3)}</dd></div> : null}</dl></article>)}</div> : null}
+        {!running && !result ? <EmptyState compact icon={Search} title="暂无检索结果" description="添加可用文档并输入测试问题后开始检索。" /> : null}
+      </section>
     </div>
   );
 }
 
 function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase; setToast: Notify; onSaved: () => Promise<void>; onDeleted: () => Promise<void> }) {
   const { models, loading, error: modelsError } = useEmbeddingModels(true);
-  const [form, setForm] = useState({ name: kb.name, description: kb.description, embeddingModelId: kb.embeddingModelId });
+  const [form, setForm] = useState({
+    name: kb.name,
+    description: kb.description,
+    tags: kb.tags.join("，"),
+    sampleQuestions: kb.sampleQuestions.join("\n"),
+    embeddingModelId: kb.embeddingModelId,
+  });
   const [chunkForm, setChunkForm] = useState<ChunkForm>(chunkFormFrom(kb));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -543,10 +605,14 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
   const rebuilding = kb.status === "rebuilding";
 
   const { settings: chunk, error: chunkError } = parseChunkForm(chunkForm);
-  const validation = !form.name.trim() ? "请填写知识库名称" : chunkError;
+  const tags = parseTags(form.tags);
+  const sampleQuestions = parseSampleQuestions(form.sampleQuestions);
+  const validation = !form.name.trim() ? "请填写知识库名称" : routeFieldError(tags, sampleQuestions) ?? chunkError;
   const changes: Partial<KnowledgeBaseInput> = {};
   if (form.name.trim() !== kb.name) changes.name = form.name.trim();
   if (form.description.trim() !== kb.description) changes.description = form.description.trim();
+  if (!sameStrings(tags, kb.tags)) changes.tags = tags;
+  if (!sameStrings(sampleQuestions, kb.sampleQuestions)) changes.sampleQuestions = sampleQuestions;
   if (form.embeddingModelId !== kb.embeddingModelId) changes.embeddingModelId = form.embeddingModelId;
   if (chunk.chunkSize !== kb.chunkSize) changes.chunkSize = chunk.chunkSize;
   if (chunk.chunkOverlap !== kb.chunkOverlap) changes.chunkOverlap = chunk.chunkOverlap;
@@ -599,6 +665,8 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
             {modelsError ? <small>{modelsError}</small> : null}
           </label>
           <label className="wide-field"><span>知识库说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" disabled={rebuilding} /></label>
+          <label className="wide-field"><span>路由标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="使用逗号分隔，最多 20 个" disabled={rebuilding} /><small className="field-hint">用于自动选库的关键词，单个标签最多 50 个字符。</small></label>
+          <label className="wide-field"><span>示例问题</span><textarea value={form.sampleQuestions} onChange={(event) => setForm({ ...form, sampleQuestions: event.target.value })} placeholder="每行填写一个问题，最多 20 个" disabled={rebuilding} /><small className="field-hint">系统会将问题与这些表达进行匹配，以提高选库准确性。</small></label>
           <div className="wide-field"><ChunkSettingsFields id="kb-settings" value={chunkForm} onChange={setChunkForm} disabled={rebuilding} /></div>
         </div>
         {modelChanged && kb.chunkCount ? <div className="panel-alert"><InlineAlert tone="warning" title="保存后将重建向量索引">将使用新模型重新向量化全部 {kb.chunkCount.toLocaleString()} 个分段，期间不能导入文档或编辑分段；重建失败时保留原索引。</InlineAlert></div> : null}
@@ -617,24 +685,27 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
 
 function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: boolean; role: Role; onOpenChange: (open: boolean) => void; onCreated: (kb: KnowledgeBase) => Promise<void> }) {
   const { models, loading, error: modelsError } = useEmbeddingModels(open);
-  const [form, setForm] = useState({ name: "", description: "", embeddingModelId: "" });
+  const [form, setForm] = useState({ name: "", description: "", tags: "", sampleQuestions: "", embeddingModelId: "" });
   const [chunkForm, setChunkForm] = useState<ChunkForm>(DEFAULT_CHUNK_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const embeddingModelId = form.embeddingModelId || models[0]?.id || "";
-  const { settings: chunk, error: validation } = parseChunkForm(chunkForm);
+  const tags = parseTags(form.tags);
+  const sampleQuestions = parseSampleQuestions(form.sampleQuestions);
+  const { settings: chunk, error: chunkError } = parseChunkForm(chunkForm);
+  const validation = routeFieldError(tags, sampleQuestions) ?? chunkError;
 
   const close = (next: boolean) => {
     if (submitting) return;
     onOpenChange(next);
-    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", embeddingModelId: "" }); setChunkForm(DEFAULT_CHUNK_FORM); setError(null); }, 150);
+    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", tags: "", sampleQuestions: "", embeddingModelId: "" }); setChunkForm(DEFAULT_CHUNK_FORM); setError(null); }, 150);
   };
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      const created = await createKnowledgeBase({ name: form.name.trim(), description: form.description.trim(), embeddingModelId, ...chunk });
+      const created = await createKnowledgeBase({ name: form.name.trim(), description: form.description.trim(), tags, sampleQuestions, embeddingModelId, ...chunk });
       setSubmitting(false);
       close(false);
       await onCreated(created);
@@ -649,6 +720,8 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
       <div className="modal-form">
         <label><span>名称</span><input autoFocus value={form.name} maxLength={120} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="输入知识库名称" /></label>
         <label><span>说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" /></label>
+        <label><span>路由标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="使用逗号分隔，最多 20 个" /><small className="field-hint">用于自动选库的关键词。</small></label>
+        <label><span>示例问题</span><textarea value={form.sampleQuestions} onChange={(event) => setForm({ ...form, sampleQuestions: event.target.value })} placeholder="每行填写一个问题，最多 20 个" /><small className="field-hint">帮助系统识别这个知识库适合回答的问题。</small></label>
         <label><span>Embedding 模型</span>
           <select value={embeddingModelId} onChange={(event) => setForm({ ...form, embeddingModelId: event.target.value })} disabled={loading || !models.length}>
             {loading ? <option value="">正在加载…</option> : null}

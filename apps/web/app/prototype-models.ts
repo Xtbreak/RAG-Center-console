@@ -11,6 +11,8 @@ export type KnowledgeBase = {
   id: string;
   name: string;
   description: string;
+  tags: string[];
+  sampleQuestions: string[];
   embeddingModelId: string;
   embeddingModelName: string;
   vectorDimension: number;
@@ -26,6 +28,71 @@ export type KnowledgeBase = {
   chunkCount: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ChatRouteSelection = {
+  knowledgeBaseId: string;
+  name: string;
+  score: number;
+  reason: string;
+};
+
+export type ChatCitation = {
+  index: number;
+  chunkId: string;
+  knowledgeBaseId: string;
+  knowledgeBaseName: string;
+  documentId: string;
+  filename: string;
+  content: string;
+  location: ChunkLocation;
+};
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  citations: ChatCitation[];
+  route: ChatRouteSelection[];
+  status: "completed" | "failed" | string;
+  errorMessage: string | null;
+  createdAt: string;
+};
+
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ConversationDetail = ConversationSummary & {
+  messages: ChatMessage[];
+};
+
+export type RetrievalHit = {
+  chunkId: string;
+  knowledgeBaseId: string;
+  knowledgeBaseName: string;
+  documentId: string;
+  filename: string;
+  position: number;
+  kind: KnowledgeChunk["kind"];
+  content: string;
+  location: ChunkLocation;
+  denseScore: number;
+  bm25Score: number;
+  rrfScore: number;
+  rerankScore: number | null;
+};
+
+export type RetrievalTestResult = {
+  query: string;
+  selectedKnowledgeBases: ChatRouteSelection[];
+  hits: RetrievalHit[];
+  insufficient: boolean;
+  rerankApplied: boolean;
+  warnings: string[];
 };
 
 export type DocumentStatus =

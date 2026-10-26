@@ -72,6 +72,45 @@ class AnonymousSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
+    conversations: Mapped[list["Conversation"]] = relationship(
+        back_populates="anonymous_session", cascade="all, delete-orphan"
+    )
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    anonymous_session_id: Mapped[str] = mapped_column(
+        ForeignKey("anonymous_sessions.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(120), default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    anonymous_session: Mapped[AnonymousSession] = relationship(back_populates="conversations")
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    citations: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    route: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="completed")
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
 
 class Provider(Base):
     __tablename__ = "providers"
@@ -131,6 +170,8 @@ class KnowledgeBase(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     name: Mapped[str] = mapped_column(String(120), unique=True)
     description: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    sample_questions: Mapped[list[str]] = mapped_column(JSON, default=list)
     embedding_model_id: Mapped[str] = mapped_column(
         ForeignKey("model_definitions.id", ondelete="RESTRICT"), index=True
     )
@@ -149,6 +190,27 @@ class KnowledgeBase(Base):
     documents: Mapped[list["Document"]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"
     )
+    route_index: Mapped["KnowledgeBaseRouteIndex | None"] = relationship(
+        back_populates="knowledge_base", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class KnowledgeBaseRouteIndex(Base):
+    """独立于文档向量集合的知识库路由索引。"""
+
+    __tablename__ = "knowledge_base_route_indexes"
+
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True
+    )
+    model_id: Mapped[str] = mapped_column(ForeignKey("model_definitions.id", ondelete="CASCADE"), index=True)
+    profile_hash: Mapped[str] = mapped_column(String(64))
+    profile_text: Mapped[str] = mapped_column(Text)
+    vector: Mapped[list[float]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="route_index")
+    model: Mapped[ModelDefinition] = relationship()
 
 
 class Document(Base):

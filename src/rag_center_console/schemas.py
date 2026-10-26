@@ -158,6 +158,8 @@ ChunkMethodName = Literal["heading", "recursive"]
 class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    sample_questions: list[str] = Field(default_factory=list, max_length=20)
     embedding_model_id: str
     chunk_size: int = Field(default=800, ge=100, le=4000)
     chunk_overlap: int = Field(default=120, ge=0, le=1000)
@@ -168,23 +170,37 @@ class KnowledgeBaseCreate(BaseModel):
     def overlap_smaller_than_size(self):
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("分段重叠必须小于分段长度")
+        self.tags = _clean_route_texts(self.tags, 50, "标签")
+        self.sample_questions = _clean_route_texts(self.sample_questions, 300, "示例问题")
         return self
 
 
 class KnowledgeBaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    sample_questions: list[str] | None = Field(default=None, max_length=20)
     embedding_model_id: str | None = None
     chunk_size: int | None = Field(default=None, ge=100, le=4000)
     chunk_overlap: int | None = Field(default=None, ge=0, le=1000)
     chunk_method: ChunkMethodName | None = None
     heading_level: int | None = Field(default=None, ge=1, le=6)
 
+    @model_validator(mode="after")
+    def clean_route_fields(self):
+        if self.tags is not None:
+            self.tags = _clean_route_texts(self.tags, 50, "标签")
+        if self.sample_questions is not None:
+            self.sample_questions = _clean_route_texts(self.sample_questions, 300, "示例问题")
+        return self
+
 
 class KnowledgeBaseRead(BaseModel):
     id: str
     name: str
     description: str
+    tags: list[str]
+    sample_questions: list[str]
     embedding_model_id: str
     embedding_model_name: str
     vector_dimension: int
@@ -256,3 +272,94 @@ class ChunkPage(BaseModel):
 
 class ChunkUpdate(BaseModel):
     content: str = Field(min_length=1, max_length=20000)
+
+
+class RetrievalTestRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=8, ge=1, le=20)
+
+
+class RouteSelectionRead(BaseModel):
+    knowledge_base_id: str
+    name: str
+    score: float
+    reason: str
+
+
+class RetrievalHitRead(BaseModel):
+    chunk_id: str
+    knowledge_base_id: str
+    knowledge_base_name: str
+    document_id: str
+    filename: str
+    position: int
+    kind: str
+    content: str
+    location: dict
+    dense_score: float
+    bm25_score: float
+    rrf_score: float
+    rerank_score: float | None
+
+
+class RetrievalTestResponse(BaseModel):
+    query: str
+    selected_knowledge_bases: list[RouteSelectionRead]
+    hits: list[RetrievalHitRead]
+    insufficient: bool
+    rerank_applied: bool
+    warnings: list[str]
+
+
+class ChatStreamRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = None
+
+
+class ChatCitationRead(BaseModel):
+    index: int
+    chunk_id: str
+    knowledge_base_id: str
+    knowledge_base_name: str
+    document_id: str
+    filename: str
+    content: str
+    location: dict
+
+
+class ChatMessageRead(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    citations: list[dict]
+    route: list[dict]
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+
+class ConversationRead(BaseModel):
+    id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetail(ConversationRead):
+    messages: list[ChatMessageRead]
+
+
+def _clean_route_texts(values: list[str], max_length: int, label: str) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = value.strip()
+        if not item:
+            continue
+        if len(item) > max_length:
+            raise ValueError(f"{label}单项不能超过 {max_length} 个字符")
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(item)
+    return cleaned

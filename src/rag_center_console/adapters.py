@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -626,6 +627,24 @@ class EmbeddingResult:
     usage: dict[str, int | float] | None
 
 
+@dataclass(slots=True)
+class GenerationResult:
+    text: str
+    usage: dict[str, int | float] | None
+
+
+@dataclass(slots=True)
+class RerankItem:
+    index: int
+    score: float
+
+
+@dataclass(slots=True)
+class RerankResult:
+    items: list[RerankItem]
+    usage: dict[str, int | float] | None
+
+
 async def _post_json(
     client: httpx.AsyncClient,
     url: str,
@@ -737,6 +756,236 @@ async def embed_texts(
         if owns_client:
             await client.aclose()
     return EmbeddingResult(vectors=vectors, usage=usage_total or None)
+
+
+async def generate_text(
+    target: ProbeTarget,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 800,
+    temperature: float = 0.0,
+    json_mode: bool = False,
+    client: httpx.AsyncClient | None = None,
+    sleep: Any = None,
+) -> GenerationResult:
+    """统一调用对话模型；只接受纯文本角色消息，供路由与回答链复用。"""
+    if not messages or any(message.get("role") not in {"system", "user", "assistant"} for message in messages):
+        raise HealthCheckFailure("对话消息格式无效")
+    bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+    if target.protocol == "OpenAI Chat Completions":
+        url, headers = _endpoint(target.base_url, "chat/completions"), bearer
+        payload: dict[str, Any] = {
+            "model": target.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+    elif target.protocol == "OpenAI Responses":
+        url, headers = _endpoint(target.base_url, "responses"), bearer
+        system = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        payload = {
+            "model": target.model_id,
+            "input": [message for message in messages if message["role"] != "system"],
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            payload["instructions"] = system
+        if json_mode:
+            payload["text"] = {"format": {"type": "json_object"}}
+    elif target.protocol == "Anthropic Messages":
+        url = _endpoint(target.base_url, "messages")
+        headers = {
+            "x-api-key": target.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+        system = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        payload = {
+            "model": target.model_id,
+            "messages": [message for message in messages if message["role"] != "system"],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system:
+            payload["system"] = system
+    else:
+        raise HealthCheckFailure(f"协议 {target.protocol} 不支持文本生成")
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    try:
+        body = await _post_json(client, url, headers, payload, target.api_key, sleep=sleep)
+    finally:
+        if owns_client:
+            await client.aclose()
+    text = _extract_text(target.protocol, body)
+    if not text:
+        raise HealthCheckFailure("模型没有返回文本")
+    return GenerationResult(text=text, usage=_usage(body))
+
+
+def _generation_request(
+    target: ProbeTarget,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    temperature: float,
+    stream: bool,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+    if target.protocol == "OpenAI Chat Completions":
+        return _endpoint(target.base_url, "chat/completions"), bearer, {
+            "model": target.model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+            **({"stream_options": {"include_usage": True}} if stream else {}),
+        }
+    if target.protocol == "OpenAI Responses":
+        system = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        payload: dict[str, Any] = {
+            "model": target.model_id,
+            "input": [message for message in messages if message["role"] != "system"],
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        if system:
+            payload["instructions"] = system
+        return _endpoint(target.base_url, "responses"), bearer, payload
+    if target.protocol == "Anthropic Messages":
+        system = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+        payload = {
+            "model": target.model_id,
+            "messages": [message for message in messages if message["role"] != "system"],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": stream,
+        }
+        if system:
+            payload["system"] = system
+        return _endpoint(target.base_url, "messages"), {
+            "x-api-key": target.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }, payload
+    raise HealthCheckFailure(f"协议 {target.protocol} 不支持文本生成")
+
+
+async def stream_text(
+    target: ProbeTarget,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+    client: httpx.AsyncClient | None = None,
+) -> AsyncIterator[str]:
+    """把三类对话协议的供应商 SSE 统一为纯文本增量。"""
+    url, headers, payload = _generation_request(
+        target, messages, max_tokens=max_tokens, temperature=temperature, stream=True
+    )
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    try:
+        try:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    await response.aread()
+                    raise HealthCheckFailure(_error_message(response, target.api_key))
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(data)
+                    except ValueError:
+                        continue
+                    delta = _stream_delta(target.protocol, event)
+                    if delta:
+                        yield delta
+        except httpx.TimeoutException as exc:
+            raise HealthCheckFailure("调用供应商超时") from exc
+        except httpx.RequestError as exc:
+            raise HealthCheckFailure(f"无法连接供应商：{exc.__class__.__name__}") from exc
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+def _stream_delta(protocol: str, event: Any) -> str:
+    if not isinstance(event, dict):
+        return ""
+    if protocol == "OpenAI Chat Completions":
+        choices = event.get("choices") or []
+        if not choices:
+            return ""
+        content = (choices[0].get("delta") or {}).get("content")
+        return content if isinstance(content, str) else ""
+    if protocol == "OpenAI Responses":
+        return str(event.get("delta") or "") if event.get("type") == "response.output_text.delta" else ""
+    if protocol == "Anthropic Messages" and event.get("type") == "content_block_delta":
+        delta = event.get("delta") or {}
+        return str(delta.get("text") or "") if delta.get("type") == "text_delta" else ""
+    return ""
+
+
+async def rerank_texts(
+    target: ProbeTarget,
+    query: str,
+    documents: list[str],
+    *,
+    top_n: int | None = None,
+    client: httpx.AsyncClient | None = None,
+    sleep: Any = None,
+) -> RerankResult:
+    """调用 Cohere 或 DashScope 兼容重排接口，并统一为 index/score。"""
+    if not documents:
+        return RerankResult(items=[], usage=None)
+    limit = min(max(top_n or len(documents), 1), len(documents))
+    bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
+    if target.protocol == "Cohere Rerank":
+        url, headers, payload = _endpoint(target.base_url, "rerank"), bearer, {
+            "model": target.model_id,
+            "query": query,
+            "documents": documents,
+            "top_n": limit,
+        }
+    elif target.protocol == "DashScope Rerank":
+        url, headers, payload = _dashscope_native_url(
+            target.base_url, "services/rerank/text-rerank/text-rerank"
+        ), bearer, {
+            "model": target.model_id,
+            "input": {"query": query, "documents": documents},
+            "parameters": {"top_n": limit, "return_documents": False},
+        }
+    else:
+        raise HealthCheckFailure(f"协议 {target.protocol} 不支持重排")
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    try:
+        body = await _post_json(client, url, headers, payload, target.api_key, sleep=sleep)
+    finally:
+        if owns_client:
+            await client.aclose()
+    raw = body.get("results") if target.protocol == "Cohere Rerank" else (body.get("output") or {}).get("results")
+    if not isinstance(raw, list):
+        raise HealthCheckFailure("重排响应缺少结果字段")
+    items: list[RerankItem] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+            raise HealthCheckFailure("重排响应结构无效")
+        score = item.get("relevance_score", item.get("score", 0.0))
+        items.append(RerankItem(index=item["index"], score=float(score)))
+    return RerankResult(items=items[:limit], usage=_usage(body))
 
 
 IMAGE_PROMPT = "请用中文客观描述这张图片的内容，包括其中的文字、图表数据和关键信息，用于知识库检索。不要编造图片中没有的内容。"
