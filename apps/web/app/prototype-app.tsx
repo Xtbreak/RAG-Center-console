@@ -761,7 +761,7 @@ type ModelSelectionDraft = {
   protocol: string;
   vectorDimension: string;
   typeConfidence: "high" | "medium" | "low";
-  typeSource: "automatic" | "saved" | "adjusted";
+  typeSource: "automatic" | "corrected" | "saved" | "adjusted";
 };
 
 function AddProviderModal({ preset, configuredProvider, configuredModels, onOpenChange, setToast, setErrorToast, onSaved }: { preset: ProviderPreset | null; configuredProvider: ModelProvider | null; configuredModels: ModelInstance[]; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
@@ -808,15 +808,17 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
   const draftForModel = (model: DiscoveredModel): ModelSelectionDraft => {
     const existing = configuredModels.find((item) => item.modelId === model.id);
     const inferredType = allowedModelTypes.includes(model.modelType) ? model.modelType : allowedModelTypes[0] ?? "llm";
-    const modelType = existing?.modelType ?? inferredType;
+    const shouldUseInference = !existing || model.typeConfidence !== "low";
+    const modelType = shouldUseInference ? inferredType : existing.modelType;
+    const corrected = Boolean(existing && existing.modelType !== modelType);
     return {
       id: model.id,
       name: existing?.name ?? model.name ?? model.id,
       modelType,
-      protocol: existing?.protocol ?? protocolForType(modelType),
+      protocol: existing && !corrected ? existing.protocol : protocolForType(modelType),
       vectorDimension: existing?.vectorDimension ? String(existing.vectorDimension) : "",
       typeConfidence: existing ? "high" : model.typeConfidence,
-      typeSource: existing ? "saved" : "automatic",
+      typeSource: corrected ? "corrected" : existing ? "saved" : "automatic",
     };
   };
 
@@ -889,7 +891,8 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
       const provider = configuredProvider ? await updateProvider(configuredProvider.id, providerInput) : await createProvider(providerInput);
       if (!configuredProvider) createdProviderId = provider.id;
       for (const selection of selections) {
-        const existing = configuredModels.find((model) => model.modelId === selection.id && model.modelType === selection.modelType);
+        const existing = configuredModels.find((model) => model.modelId === selection.id && model.modelType === selection.modelType)
+          ?? configuredModels.find((model) => model.modelId === selection.id);
         const modelInput = {
           providerId: provider.id,
           name: existing?.name ?? selection.name.slice(0, 120),
@@ -959,7 +962,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
           const isSaved = configuredModels.some((item) => item.modelId === model.id);
           return <div className={cn("model-discovery-item", draft && "is-selected")} key={model.id}>
             <label className="model-discovery-check"><input type="checkbox" checked={Boolean(draft)} onChange={(event) => toggleModel(model, event.target.checked)} /><span><strong>{model.name}</strong>{model.name !== model.id ? <small>{model.id}</small> : null}</span>{isSaved ? <em>已保存</em> : null}</label>
-            {draft ? <div className="model-discovery-config"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(draft.modelType)} <small>{draft.typeSource === "saved" ? "已保存配置" : draft.typeSource === "adjusted" ? "已调整" : draft.typeConfidence === "low" ? "自动归类" : "自动识别"}</small></strong></div><div className="model-auto-value"><span>调用协议</span><strong>{draft.protocol}</strong></div>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => updateModelDraft(model.id, { vectorDimension: event.target.value })} /></label> : null}<details className="model-advanced-settings"><summary>调整识别结果</summary><div><label><span>模型类别</span><select value={draft.modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const modelType = event.target.value as ModelInstance["modelType"]; updateModelDraft(model.id, { modelType, protocol: protocolForType(modelType), vectorDimension: modelType === "embedding" ? draft.vectorDimension : "", typeSource: "adjusted" }); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{modelTypeLabel(type)}</option>)}</select></label><label><span>调用协议</span><select value={draft.protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => updateModelDraft(model.id, { protocol: event.target.value })}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div></details></div> : null}
+            {draft ? <div className="model-discovery-config"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(draft.modelType)} <small>{draft.typeSource === "saved" ? "已保存配置" : draft.typeSource === "corrected" ? "自动修正" : draft.typeSource === "adjusted" ? "已调整" : draft.typeConfidence === "low" ? "自动归类" : "自动识别"}</small></strong></div><div className="model-auto-value"><span>调用协议</span><strong>{draft.protocol}</strong></div>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => updateModelDraft(model.id, { vectorDimension: event.target.value })} /></label> : null}<details className="model-advanced-settings"><summary>调整识别结果</summary><div><label><span>模型类别</span><select value={draft.modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const modelType = event.target.value as ModelInstance["modelType"]; updateModelDraft(model.id, { modelType, protocol: protocolForType(modelType), vectorDimension: modelType === "embedding" ? draft.vectorDimension : "", typeSource: "adjusted" }); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{modelTypeLabel(type)}</option>)}</select></label><label><span>调用协议</span><select value={draft.protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => updateModelDraft(model.id, { protocol: event.target.value })}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div></details></div> : null}
           </div>;
         })}
       </div> : <div className="model-discovery-empty" role="status">{discoveredModels.length ? "没有符合搜索条件的模型。" : "供应商未返回模型，可重新获取或手动填写模型 ID。"}</div>}
