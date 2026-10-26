@@ -36,14 +36,17 @@ services:
     ports:
       - "6379:6379"
 
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: server /data --console-address ":9001"
+  rustfs:
+    image: rustfs/rustfs:latest
+    command: ["/data"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-rag_center}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-now}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rag_center}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rag-center-dev-secret}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
-      - minio_data:/data
+      - rustfs_data:/data
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -75,4 +78,4 @@ volumes:
   postgres_data:
   qdrant_data:
   redis_data:
-  minio_data:
+  rustfs_data:

@@ -44,7 +44,7 @@ npm run dev
 
 浏览器访问 `http://localhost:3000`，API 文档位于 `http://localhost:8000/docs`。当前版本默认以零数据空状态启动，不包含预置业务示例。
 
-安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、MinIO、API 和 Web。
+安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、RustFS、API 和 Web。
 
 质量检查：
 
