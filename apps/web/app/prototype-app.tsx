@@ -35,10 +35,12 @@ import {
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  providerPresets,
   roleCopy,
   type DocumentItem,
   type KnowledgeBase,
   type ModelProvider,
+  type ProviderPreset,
   type Role,
 } from "./prototype-models";
 
@@ -586,34 +588,59 @@ function ChatView({ navigate, role, hasKnowledgeBase, readyForChat }: { navigate
 }
 
 function ModelsView({ setToast, providers, setProviders }: { setToast: (message: string) => void; providers: ModelProvider[]; setProviders: (providers: ModelProvider[]) => void }) {
-  const [addOpen, setAddOpen] = useState(false);
+  const [selectedPreset, setSelectedPreset] = useState<ProviderPreset | null>(null);
+  const customPreset = providerPresets.find((preset) => preset.custom)!;
+  const saveProvider = (provider: ModelProvider) => {
+    setProviders([...providers.filter((item) => item.presetId !== provider.presetId), provider]);
+  };
   return (
     <div className="content-stack">
-      <div className="toolbar"><div className="toolbar-note"><KeyRound size={17} /><span>密钥加密保存，页面和日志只显示掩码。</span></div><Button variant="primary" icon={Plus} onClick={() => setAddOpen(true)}>添加供应商</Button></div>
-      {providers.length ? <div className="provider-grid">
-        {providers.map((provider) => <article className="provider-card" key={provider.name}><div className="provider-top"><div className="provider-logo">{provider.name.slice(0, 2)}</div><div><h2>{provider.name}</h2><p>{provider.protocol}</p></div><StatusBadge status={provider.health === "healthy" ? "success" : provider.health === "experimental" || provider.health === "pending" ? "warning" : "error"}>{provider.health === "healthy" ? "正常" : provider.health === "experimental" ? "实验性" : provider.health === "pending" ? "待检测" : "异常"}</StatusBadge></div><div className="provider-capability"><span>{provider.usage}</span></div><dl className="provider-stats"><div><dt>模型实例</dt><dd>{provider.models}</dd></div><div><dt>最近延迟</dt><dd>{provider.latency}</dd></div></dl><div className="provider-actions"><Button icon={Activity} onClick={() => setToast("后端接入后执行真实连接检测")}>检测连接</Button><Button variant="ghost">配置</Button></div></article>)}
-      </div> : <EmptyState icon={Bot} title="还没有模型供应商" description="添加供应商后，才能配置 LLM、Embedding、Rerank 和视觉模型。" action={<Button variant="primary" icon={Plus} onClick={() => setAddOpen(true)}>添加供应商</Button>} />}
+      <div className="toolbar"><div className="toolbar-note"><KeyRound size={17} /><span>预设仅提供配置入口，不代表供应商已连接。</span></div><Button variant="primary" icon={Plus} onClick={() => setSelectedPreset(customPreset)}>添加自定义供应商</Button></div>
+      <section className="provider-section" aria-labelledby="provider-presets-title">
+        <div className="section-heading"><div><h2 id="provider-presets-title">预设供应商</h2><p>选择供应商后填写密钥和服务地址；未配置项不会参与模型调用。</p></div><span>{providers.length} 个已配置</span></div>
+        <div className="provider-grid">
+          {providerPresets.map((preset) => {
+            const configured = providers.find((provider) => provider.presetId === preset.id);
+            return (
+              <article className="provider-card provider-preset-card" key={preset.id}>
+                <div className="provider-top">
+                  <div className="provider-logo">{preset.name.slice(0, 2)}</div>
+                  <div><h2>{preset.name}</h2><p>{preset.protocol}</p></div>
+                  <StatusBadge status={configured ? "success" : preset.experimental ? "warning" : "neutral"}>{configured ? "已配置" : preset.experimental ? "实验性 · 未配置" : "未配置"}</StatusBadge>
+                </div>
+                <p className="provider-description">{preset.description}</p>
+                <div className="provider-capability">{preset.capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>
+                <div className="provider-actions"><Button variant={configured ? "secondary" : "primary"} onClick={() => setSelectedPreset(preset)}>{configured ? "重新配置" : preset.custom ? "添加" : "配置"}</Button>{configured ? <Button icon={Activity} variant="ghost" onClick={() => setToast("后端接入后执行真实连接检测")}>检测连接</Button> : null}</div>
+              </article>
+            );
+          })}
+        </div>
+      </section>
       <section className="panel defaults-panel"><div className="panel-heading compact"><div><h2>系统默认模型</h2><p>知识库仍可绑定自己的 Embedding 模型</p></div></div><div className="defaults-grid">{["路由 Embedding", "路由 LLM", "默认 Rerank", "视觉模型"].map((label) => <label key={label}><span>{label}</span><select disabled value=""><option value="">未配置</option></select></label>)}</div></section>
-      <AddProviderModal open={addOpen} onOpenChange={setAddOpen} setToast={setToast} onAdd={(provider) => setProviders([...providers, provider])} />
+      <AddProviderModal preset={selectedPreset} onOpenChange={(open) => !open && setSelectedPreset(null)} setToast={setToast} onAdd={saveProvider} />
     </div>
   );
 }
 
-function AddProviderModal({ open, onOpenChange, setToast, onAdd }: { open: boolean; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; onAdd: (provider: ModelProvider) => void }) {
+function AddProviderModal({ preset, onOpenChange, setToast, onAdd }: { preset: ProviderPreset | null; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; onAdd: (provider: ModelProvider) => void }) {
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("OpenAI Chat Completions");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const submit = () => {
-    if (!name.trim() || !baseUrl.trim() || !apiKey.trim()) return;
-    onAdd({ name: name.trim(), protocol, models: 0, health: "pending", latency: "未检测", usage: "尚未添加模型" });
-    onOpenChange(false);
-    setToast(`${name.trim()} 已添加到当前原型会话`);
-    setName("");
-    setBaseUrl("");
+  useEffect(() => {
+    if (!preset) return;
+    setName(preset.custom ? "" : preset.name);
+    setProtocol(preset.protocolValue);
+    setBaseUrl(preset.baseUrl ?? "");
     setApiKey("");
+  }, [preset]);
+  const submit = () => {
+    if (!preset || !name.trim() || !baseUrl.trim() || !apiKey.trim()) return;
+    onAdd({ id: crypto.randomUUID(), presetId: preset.id, name: name.trim(), protocol, models: 0, health: "pending", latency: "未检测", usage: preset.capabilities.join(" · ") });
+    onOpenChange(false);
+    setToast(`${name.trim()} 已保存到当前原型会话`);
   };
-  return <Modal open={open} onOpenChange={onOpenChange} title="添加模型供应商" description="当前为前端原型，输入内容只保留在本次浏览器会话中。"><div className="modal-form"><label><span>供应商名称</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label><label><span>协议</span><select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label><label><span>Base URL</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="输入 API 地址" /></label><label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入 API Key" autoComplete="off" /></label></div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)}>取消</Button><Button variant="primary" onClick={submit} disabled={!name.trim() || !baseUrl.trim() || !apiKey.trim()}>保存供应商</Button></div></Modal>;
+  return <Modal open={Boolean(preset)} onOpenChange={onOpenChange} title={preset?.custom ? "添加自定义供应商" : `配置${preset?.name ?? "供应商"}`} description="当前为前端原型，输入内容只保留在本次浏览器会话中。"><div className="modal-form"><label><span>供应商名称</span><input autoFocus value={name} readOnly={!preset?.custom} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label><label><span>协议</span><select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label><label><span>Base URL</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="输入 API 地址" /></label><label><span>API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入 API Key" autoComplete="off" /></label>{preset?.experimental ? <div className="provider-warning"><ShieldAlert size={15} aria-hidden="true" /><span>Kimi Code 为实验性 LLM 渠道，需要单独验证普通问答、流式输出和 usage 返回。</span></div> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)}>取消</Button><Button variant="primary" onClick={submit} disabled={!name.trim() || !baseUrl.trim() || !apiKey.trim()}>保存配置</Button></div></Modal>;
 }
 
 function LogsView() {
