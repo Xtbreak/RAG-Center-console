@@ -1,0 +1,19 @@
+[project]
+name = "rag-center-console"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Xbreak", email = "1359521763@qq.com" }
+]
+requires-python = ">=3.15"
+dependencies = [
+    "langchain>=1.4.7",
+]
+
+[project.scripts]
+rag-center-console = "rag_center_console:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"

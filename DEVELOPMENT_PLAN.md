@@ -1,0 +1,169 @@
+# 企业知识库中台 1.0 开发计划
+
+> 状态：已确认，作为 1.0 开发基线  
+> 建立日期：2026-10-26  
+> 变更规则：任何范围、架构或验收口径变化，必须先获得用户确认，再更新本文档的“变更记录”。
+
+## 1. 产品目标
+
+面向企业内部使用，完成以下知识库问答闭环：
+
+`模型配置 → 文件导入 → 云端解析/OCR → 切分与向量化 → 全库自动路由 → 混合检索 → Rerank → 流式回答与引用 → 查询日志`
+
+一期不开发登录、多租户、工作流、Agent、插件、外部知识源同步、知识图谱和公开分享。
+
+## 2. 角色与权限
+
+| 角色 | 能力 |
+| --- | --- |
+| 管理员 | 模型与 OCR 配置、全部知识库、全部查询日志、系统设置 |
+| 知识库管理人员 | 知识库、文件、分段、重建、检索测试；不可查看密钥和全局问答日志 |
+| 使用者 | 在线对话、当前匿名会话历史、回答引用 |
+
+第一版不做登录。首次进入时选择角色，由服务端匿名会话保存；允许切换角色，但必须明确提示“当前为无登录演示模式”。该机制只用于界面与接口功能分流，不构成安全鉴权。
+
+## 3. 技术架构
+
+| 模块 | 技术 | 采用原因 | 主要代价 |
+| --- | --- | --- | --- |
+| 前端 | Next.js、TypeScript、Tailwind、shadcn/ui | 适合企业后台，原型可直接演进为正式前端 | 增加 Node.js 构建服务 |
+| 后端 | FastAPI、LangChain、SQLAlchemy、Alembic | 适合模型适配、RAG 和文档处理 | 需保持核心检索逻辑可独立测试 |
+| 业务数据 | PostgreSQL | 统一保存事务数据、配置和日志 | 不承担多维向量索引 |
+| 向量检索 | Qdrant | 每库独立 collection，可使用不同 embedding 模型与维度 | 增加一个基础服务 |
+| 文件存储 | MinIO | S3 兼容，适合私有保存原文件和图片 | 增加对象存储运维 |
+| 异步任务 | Redis、Celery、Celery Beat | 支持进度、重试、定时清理与恢复 | 增加队列服务 |
+| 文档解析 | 阿里云文档智能 | 支持中文 Office、PDF、图片、表格和层级输出 | 文件需发送到云端并产生费用 |
+
+单机 Docker Compose 部署，包括 Nginx、Web、API、Worker、PostgreSQL、Qdrant、Redis 和 MinIO。目标规模为 50 个并发以内、单文件不超过 100 MB、单库不超过 10 万段、总量不超过 100 万段。
+
+## 4. 页面与交互
+
+采用左侧主导航、顶部上下文区和主工作区的信息架构，参考 FastGPT 的知识库、模型管理、检索测试和调用日志流程，但不复制其界面或代码。
+
+1. 角色选择与系统概览。
+2. 知识库列表：状态、文档数、分段数、embedding 模型和更新时间。
+3. 知识库详情：文档、分段、检索测试、配置。
+4. 导入向导：文件、解析策略、图片处理、切分参数和确认。
+5. 处理任务：阶段、进度、错误、重试、取消。
+6. 在线对话：全库自动路由、流式回答、命中知识库和引用侧栏。
+7. 模型服务：供应商、模型实例、能力标签、默认用途、健康检测。
+8. 运行日志：问答、路由、引用、模型、Token、耗时和错误。
+
+视觉方向为浅色、高密度企业后台：石墨色正文、冷灰背景、蓝色主操作、绿色成功、红色异常。使用系统中文无衬线字体、清晰的数据层级和克制动效。重点视觉元素为可追踪的“导入处理链路”。
+
+## 5. 模型服务
+
+### 5.1 供应商和模型类型
+
+供应商：OpenRouter、AIHubMix、通义、DeepSeek、Kimi Code、自定义供应商。
+
+模型类型：
+
+- LLM
+- Embedding
+- Rerank
+- Vision
+
+支持协议：
+
+- OpenAI Chat Completions
+- OpenAI Responses
+- OpenAI Embeddings
+- Anthropic Messages
+- Cohere 兼容 Rerank
+
+### 5.2 配置与安全
+
+- 模型配置包括模型 ID、Base URL、上下文长度、向量维度、能力、超时和默认用途。
+- 所有模型实例提供真实健康检测。
+- 密钥使用环境主密钥加密保存，接口只返回掩码。
+- 日志禁止记录 API Key、Authorization 请求头或其他鉴权值。
+- usage 优先采用供应商返回值；缺失时允许本地估算，但必须记录 `estimated=true`。
+
+### 5.3 Kimi Code
+
+Kimi Code 使用中国区 `https://api.kimi.com/coding/v1`，标记为“实验性 LLM 渠道”。必须验证普通问答、流式输出和 usage 字段；不作为 embedding 或 rerank 服务。接口拒绝普通产品调用时直接展示限制原因，不静默降级。
+
+## 6. 文档导入
+
+支持以下格式：
+
+- Word：`.doc`、`.docx`
+- PDF：可读取 PDF、扫描 PDF
+- Markdown：`.md`
+- 图片：`.png`、`.jpg`、`.jpeg`、`.webp`、`.tiff`
+- 表格：`.csv`、`.xls`、`.xlsx`
+
+处理流程：
+
+1. 校验扩展名、MIME 和文件大小，计算 SHA-256 并提示重复文件。
+2. 原文件写入 MinIO，PostgreSQL 创建导入任务。
+3. PDF、Word、图片调用阿里云文档智能；Markdown 和普通表格优先结构化解析，复杂内容转云端解析。
+4. 独立图片和文档内图片执行云端 OCR，并用已配置的视觉模型生成语义描述。
+5. 保留标题层级、页码、图片区域、表格行列、工作表名和来源文件。
+6. 按标题和段落优先切分，超长内容再按 Token 切分；表格按表头与数据行分组。
+7. 使用知识库绑定的 embedding 模型写入该库的 Qdrant collection。
+8. 状态统一为上传、解析、图片增强、切分、向量化、就绪、部分失败、失败、已取消。
+9. 支持查看、编辑分段并局部重新向量化；更换 embedding 模型必须整库重建。
+
+## 7. 自动选库、检索与对话
+
+1. 建立独立知识库路由索引，使用统一路由 embedding 模型索引库名、说明、标签和示例问题。
+2. 查询时先召回候选库，再由路由 LLM 选择最多 3 个知识库。
+3. 对候选库分别调用其绑定的 embedding 模型。
+4. 在各自 Qdrant collection 中执行稠密向量和 BM25 混合检索。
+5. 库内采用 RRF，跨库再次按排名融合；配置 rerank 时统一重排。
+6. 上下文保留知识库、文件、页码、标题、表格或图片位置。
+7. 回答使用 SSE 流式返回，同时返回阶段事件和引用。
+8. 无充分依据时明确说明未检索到支持内容。
+9. 路由候选、最终选库、检索、重排和模型调用均写入日志。
+
+## 8. 主要接口
+
+- `/api/v1/session`：角色选择和匿名会话。
+- `/api/v1/providers`、`/api/v1/models`：供应商、模型和健康检测。
+- `/api/v1/knowledge-bases`：知识库、配置、分段和重建。
+- `/api/v1/documents`、`/api/v1/ingestion-jobs`：上传、进度、取消和重试。
+- `/api/v1/retrieval/test`：自动选库和检索调试。
+- `/api/v1/conversations`、`/api/v1/messages/stream`：会话和 SSE 对话。
+- `/api/v1/logs`：查询、路由和模型调用明细。
+
+## 9. 日志与留存
+
+默认保存 90 天，期限可由管理员调整并由定时任务清理：
+
+- 查询、完整回答、引用和会话 ID。
+- 路由候选、最终知识库、检索和 rerank 耗时。
+- 供应商、模型、调用类型、输入/输出/总 Token。
+- 总耗时、首 Token 耗时、状态、重试次数和脱敏错误。
+
+不保存 API Key、鉴权头和完整系统提示词。
+
+## 10. 测试与验收
+
+- 前端：响应式、键盘操作、焦点、空状态、加载、错误与重试。
+- 模型：每种协议执行模拟契约测试，配置真实 Key 后执行可选连通测试。
+- 文档：原生 PDF、扫描 PDF、含图片和表格的 Word、Markdown、图片、CSV、XLSX。
+- RAG：明确命中、跨库、歧义、无答案、超时、限流和流中断。
+- 指标：使用真实标注问题集记录选库准确率、Recall@K、引用正确率和无依据回答率，不预先编造目标值。
+- 系统：三个角色端到端流程、50 并发、任务恢复、日志清理和备份恢复。
+
+## 11. 开发门禁
+
+严格按照 `DEVELOPMENT_WORKFLOW.md` 顺序开发。每阶段完成实现、自测和记录后才能勾选阶段验收，并进入下一阶段。前端高保真原型必须经过用户确认，未确认不得开始后端开发。
+
+## 12. 调研依据
+
+- [FastGPT 核心功能](https://github.com/labring/fastgpt)
+- [FastGPT 知识库检索方案](https://doc.fastgpt.io/zh-CN/guide/dataset/dataset_engine)
+- [FastGPT 模型配置说明](https://doc.fastgpt.io/zh-CN/self-host/config/model/intro)
+- [阿里云文档理解](https://help.aliyun.com/zh/document-mind/product-overview/overview-of-document-understanding)
+- [Kimi Code API 说明](https://www.kimi.com/code/docs/en/)
+- [Qdrant Collections](https://qdrant.tech/documentation/manage-data/collections/)
+- [Qdrant 混合检索](https://qdrant.tech/documentation/search/hybrid-queries/)
+
+## 13. 变更记录
+
+| 日期 | 变更 | 确认状态 |
+| --- | --- | --- |
+| 2026-10-26 | 建立企业知识库中台 1.0 开发基线 | 已确认 |
