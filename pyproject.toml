@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.15"
 dependencies = [
     "alembic>=1.20.1",
+    "alibabacloud-docmind-api20220711>=1.4.15",
     "boto3>=1.43.118",
     "celery[redis]>=5.6.3",
     "cryptography>=50.0.2",
