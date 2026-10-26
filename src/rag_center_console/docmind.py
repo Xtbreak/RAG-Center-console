@@ -22,6 +22,17 @@ class ParseCancelled(RuntimeError):
     pass
 
 
+def _explain(code: str, message: str) -> str:
+    """把阿里云错误码翻译成可操作的提示。"""
+    if code == "NoPermission" or code.startswith("Forbidden"):
+        return f"阿里云拒绝访问（{code}）：请确认已开通“文档解析（大模型版）”，并为 RAM 用户授予 AliyunDocmindFullAccess 权限"
+    if code.startswith("InvalidAccessKeyId") or code in {"SignatureDoesNotMatch", "IncompleteSignature"}:
+        return f"阿里云 AccessKey 无效或已禁用（{code}），请检查配置"
+    if code.startswith("Throttling"):
+        return f"阿里云调用过于频繁（{code}），请稍后重试"
+    return f"阿里云返回错误 {code}：{message}"[:200]
+
+
 def _page_of(layout: dict[str, Any]) -> int | None:
     page = layout.get("pageNum")
     if isinstance(page, list):
@@ -97,7 +108,19 @@ class DocmindParser:
 
     def _fail(self, exc: Exception) -> ParseError:
         message = str(exc).replace(self._access_key_secret, "***") if self._access_key_secret else str(exc)
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and code:
+            return ParseError(_explain(code, message))
         return ParseError(f"阿里云文档解析失败：{message[:200]}")
+
+    @staticmethod
+    def _data(response: Any) -> Any:
+        # 业务错误（如未授权）不抛异常，而是返回 Code/Message 且 Data 为空
+        body = response.body
+        code = getattr(body, "code", None)
+        if getattr(body, "data", None) is None or (code and str(code) not in {"200", "Success", "success"}):
+            raise ParseError(_explain(str(code or "Unknown"), str(getattr(body, "message", "") or "")))
+        return body.data
 
     def parse(
         self,
@@ -120,7 +143,7 @@ class DocmindParser:
                 ),
                 RuntimeOptions(),
             )
-            job_id = submitted.body.data.id
+            job_id = self._data(submitted).id
             expected = self._wait(models, job_id, should_cancel)
             layouts = self._fetch_layouts(models, job_id, expected)
         except (ParseError, ParseCancelled):
@@ -137,7 +160,7 @@ class DocmindParser:
         while True:
             if should_cancel():
                 raise ParseCancelled()
-            status = self._client.query_doc_parser_status(models.QueryDocParserStatusRequest(id=job_id)).body.data
+            status = self._data(self._client.query_doc_parser_status(models.QueryDocParserStatusRequest(id=job_id)))
             state = str(getattr(status, "status", "") or "").lower()
             if state in _SUCCESS:
                 return getattr(status, "number_of_successful_parsing", None)
@@ -150,9 +173,11 @@ class DocmindParser:
     def _fetch_layouts(self, models: Any, job_id: str, expected: int | None) -> list[dict[str, Any]]:
         layouts: list[dict[str, Any]] = []
         while True:
-            result = self._client.get_doc_parser_result(
-                models.GetDocParserResultRequest(id=job_id, layout_num=len(layouts), layout_step_size=PAGE_SIZE)
-            ).body.data
+            result = self._data(
+                self._client.get_doc_parser_result(
+                    models.GetDocParserResultRequest(id=job_id, layout_num=len(layouts), layout_step_size=PAGE_SIZE)
+                )
+            )
             page = (result or {}).get("layouts") or []
             if not page:
                 break

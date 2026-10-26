@@ -287,3 +287,29 @@ def test_numbered_detection_is_skipped_when_markdown_headings_exist():
     assert detect_numbered_headings(parsed.elements) is parsed.elements
     sheet = [Element("heading", "Sheet1", level=1, sheet="Sheet1"), Element("paragraph", "第一章 总则")]
     assert detect_numbered_headings(sheet)[1].kind == "heading"  # 工作表名不算 Markdown 标题
+
+
+
+def test_docmind_business_errors_are_explained():
+    class Denied(FakeSdk):
+        def submit_doc_parser_job_advance(self, request, runtime):
+            return NS(body=NS(data=None, code="NoPermission", message="You are not authorized to perform this operation."))
+
+    with pytest.raises(ParseError, match="AliyunDocmindFullAccess"):
+        parser(Denied([], [])).parse(b"x", "a.pdf", "pdf")
+
+    class Throttled(FakeSdk):
+        def query_doc_parser_status(self, request):
+            return NS(body=NS(data=None, code="Throttling.User", message="slow down"))
+
+    with pytest.raises(ParseError, match="过于频繁"):
+        parser(Throttled([], [])).parse(b"x", "a.pdf", "pdf")
+
+    class SdkError(FakeSdk):
+        def submit_doc_parser_job_advance(self, request, runtime):
+            error = RuntimeError("bad key")
+            error.code = "InvalidAccessKeyId.NotFound"
+            raise error
+
+    with pytest.raises(ParseError, match="AccessKey 无效"):
+        parser(SdkError([], [])).parse(b"x", "a.pdf", "pdf")
