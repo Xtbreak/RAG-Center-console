@@ -21,8 +21,26 @@ from rag_center_console.models import ModelType, ProviderHealth
         ("OpenAI Chat Completions", "/v1/chat/completions", {"choices": [], "usage": {"total_tokens": 2}}, "messages"),
         ("OpenAI Responses", "/v1/responses", {"output": [], "usage": {"total_tokens": 2}}, "input"),
         ("OpenAI Embeddings", "/v1/embeddings", {"data": [{"embedding": [0.1]}], "usage": {"total_tokens": 1}}, "input"),
+        (
+            "DashScope Text Embeddings",
+            "/api/v1/services/embeddings/text-embedding/text-embedding",
+            {"output": {"embeddings": [{"embedding": [0.1]}]}, "usage": {"total_tokens": 1}},
+            "input",
+        ),
+        (
+            "DashScope Multimodal Embeddings",
+            "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
+            {"output": {"embeddings": [{"embedding": [0.1]}]}, "usage": {"total_tokens": 1}},
+            "input",
+        ),
         ("Anthropic Messages", "/v1/messages", {"content": [{"text": "OK"}], "usage": {"input_tokens": 1}}, "messages"),
         ("Cohere Rerank", "/v1/rerank", {"results": [{"index": 0}], "usage": {"search_units": 1}}, "documents"),
+        (
+            "DashScope Rerank",
+            "/api/v1/services/rerank/text-rerank/text-rerank",
+            {"output": {"results": [{"index": 0}]}, "usage": {"total_tokens": 1}},
+            "input",
+        ),
     ],
 )
 async def test_protocol_contracts(protocol, path, response_payload, body_key):
@@ -47,6 +65,12 @@ async def test_protocol_contracts(protocol, path, response_payload, body_key):
         assert headers["x-api-key"] == "secret-key"
     else:
         assert headers["authorization"] == "Bearer secret-key"
+
+    body = seen["body"]
+    if protocol == "DashScope Multimodal Embeddings":
+        assert body["input"] == {"contents": [{"text": "connection test"}]}
+    if protocol == "DashScope Rerank":
+        assert body["input"]["query"] == "connection test"
 
 
 @pytest.mark.asyncio
@@ -132,6 +156,139 @@ async def test_discovers_openai_data_models_with_deduplication_and_sorting():
 )
 def test_infers_model_type_from_metadata_then_model_id(model_id, metadata, expected_type, expected_confidence):
     assert infer_model_type(model_id, metadata) == (expected_type, expected_confidence)
+
+
+@pytest.mark.asyncio
+async def test_discovers_dashscope_catalog_with_pagination_and_capability_types():
+    requested_pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/models"
+        requested_pages.append(request.url.params["page_no"])
+        page_no = int(request.url.params["page_no"])
+        models = [{
+            "model": "text-embedding-v4",
+            "name": "通用文本向量V4",
+            "capabilities": ["TR"],
+        }] if page_no == 1 else [{
+            "model": "qwen3-vl-plus",
+            "name": "通义千问视觉模型",
+            "capabilities": ["VU"],
+        }]
+        return httpx.Response(200, json={
+            "output": {
+                "total": 101,
+                "page_no": page_no,
+                "page_size": 100,
+                "models": models,
+            }
+        })
+
+    target = DiscoveryTarget(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "dashscope-secret",
+        "OpenAI Chat Completions",
+        preset_id="dashscope",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert requested_pages == ["1", "2"]
+    assert [(model.id, model.model_type) for model in result.models] == [
+        ("qwen3-vl-plus", ModelType.VISION),
+        ("text-embedding-v4", ModelType.EMBEDDING),
+    ]
+    assert result.models[1].vector_dimension == 1024
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_dashscope_classifies_rerank_before_ambiguous_capability_code():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "output": {
+                "total": 1,
+                "page_no": 1,
+                "page_size": 100,
+                "models": [{"model": "gte-rerank-v2", "capabilities": ["TR"]}],
+            }
+        })
+
+    target = DiscoveryTarget(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "dashscope-secret",
+        "OpenAI Chat Completions",
+        preset_id="dashscope",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert [(model.id, model.model_type) for model in result.models] == [
+        ("gte-rerank-v2", ModelType.RERANK),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dashscope_filters_retired_and_unsupported_models_but_keeps_future_retirement():
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "output": {
+                "total": 7,
+                "page_no": 1,
+                "page_size": 100,
+                "models": [
+                    {"model": "gte-rerank", "capabilities": ["TR"]},
+                    {"model": "retired-chat", "capabilities": ["TG"], "status": "retired"},
+                    {"model": "deprecated-chat", "capabilities": ["TG"], "deprecated": True},
+                    {"model": "offline-chat", "capabilities": ["TG"], "inference_offline_info": {"offline_time": "2000-01-01T00:00:00Z"}},
+                    {"model": "future-chat", "capabilities": ["TG"], "inference_offline_info": {"offline_time": "2999-01-01T00:00:00Z"}},
+                    {"model": "image-generator", "capabilities": ["T2I"]},
+                    {"model": "speech-recognizer", "capabilities": ["ASR"]},
+                ],
+            }
+        })
+
+    target = DiscoveryTarget(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "dashscope-secret",
+        "OpenAI Chat Completions",
+        preset_id="dashscope",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert [model.id for model in result.models] == ["future-chat"]
+    assert result.truncated is False
+
+
+@pytest.mark.asyncio
+async def test_dashscope_catalog_paginates_beyond_previous_ten_page_limit():
+    requested_pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page_no = int(request.url.params["page_no"])
+        requested_pages.append(page_no)
+        return httpx.Response(200, json={
+            "output": {
+                "total": 1_001,
+                "page_no": page_no,
+                "page_size": 100,
+                "models": [{"model": f"chat-{page_no}", "capabilities": ["TG"]}],
+            }
+        })
+
+    target = DiscoveryTarget(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "dashscope-secret",
+        "OpenAI Chat Completions",
+        preset_id="dashscope",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(target, client)
+
+    assert requested_pages == list(range(1, 12))
+    assert len(result.models) == 11
+    assert result.truncated is False
 
 
 @pytest.mark.asyncio

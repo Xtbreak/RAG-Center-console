@@ -10,8 +10,11 @@ ProtocolName = Literal[
     "OpenAI Chat Completions",
     "OpenAI Responses",
     "OpenAI Embeddings",
+    "DashScope Text Embeddings",
+    "DashScope Multimodal Embeddings",
     "Anthropic Messages",
     "Cohere Rerank",
+    "DashScope Rerank",
 ]
 
 
@@ -75,6 +78,7 @@ class DiscoveredModel(BaseModel):
     name: str
     model_type: ModelType
     type_confidence: Literal["high", "medium", "low"]
+    vector_dimension: int | None = None
 
 
 class ModelDiscoveryResponse(BaseModel):

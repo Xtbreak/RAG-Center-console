@@ -83,6 +83,25 @@ function defaultProtocolForType(modelType: ModelInstance["modelType"]) {
   return "OpenAI Chat Completions";
 }
 
+function isDashScopeMultimodalEmbedding(modelId: string) {
+  const normalized = modelId.toLocaleLowerCase();
+  return normalized.includes("vl-embedding") || normalized.includes("multimodal-embedding") || normalized.includes("embedding-vision");
+}
+
+function protocolForProviderModel(preset: ProviderPreset | undefined, modelType: ModelInstance["modelType"], modelId: string, fallbackProtocol: string) {
+  if (preset?.id === "kimi-code") return "OpenAI Responses";
+  if (preset?.id === "dashscope") {
+    if (modelType === "embedding") return isDashScopeMultimodalEmbedding(modelId) ? "DashScope Multimodal Embeddings" : "DashScope Text Embeddings";
+    if (modelType === "rerank") return "DashScope Rerank";
+    return "OpenAI Chat Completions";
+  }
+  if (modelType === "embedding") return "OpenAI Embeddings";
+  if (modelType === "rerank") return "Cohere Rerank";
+  if (preset && !preset.custom) return preset.protocolValue;
+  if (["OpenAI Chat Completions", "OpenAI Responses", "Anthropic Messages"].includes(fallbackProtocol)) return fallbackProtocol;
+  return "OpenAI Chat Completions";
+}
+
 function modelTypeLabel(modelType: ModelInstance["modelType"]) {
   return { llm: "LLM", embedding: "Embedding", rerank: "Rerank", vision: "Vision" }[modelType];
 }
@@ -761,7 +780,7 @@ type ModelSelectionDraft = {
   protocol: string;
   vectorDimension: string;
   typeConfidence: "high" | "medium" | "low";
-  typeSource: "automatic" | "corrected" | "saved" | "adjusted";
+  typeSource: "automatic" | "corrected" | "saved";
 };
 
 function AddProviderModal({ preset, configuredProvider, configuredModels, onOpenChange, setToast, setErrorToast, onSaved }: { preset: ProviderPreset | null; configuredProvider: ModelProvider | null; configuredModels: ModelInstance[]; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
@@ -772,6 +791,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
   const [step, setStep] = useState<"credentials" | "models">("credentials");
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [selectedModels, setSelectedModels] = useState<Record<string, ModelSelectionDraft>>({});
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [manualMode, setManualMode] = useState(false);
   const [manualModelId, setManualModelId] = useState("");
@@ -779,8 +799,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
   const [discoveryTruncated, setDiscoveryTruncated] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [saving, setSaving] = useState(false);
-  const allowedModelTypes = supportedModelTypes(preset ?? undefined);
-
+  const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     if (!preset) return;
     setName(configuredProvider?.name ?? (preset.custom ? "" : preset.name));
@@ -790,34 +809,27 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
     setStep("credentials");
     setDiscoveredModels([]);
     setSelectedModels({});
+    setExpandedGroups({});
     setSearchQuery("");
     setManualMode(false);
     setManualModelId("");
     setDiscoveryError(null);
     setDiscoveryTruncated(false);
+    setSaveError(null);
   }, [preset, configuredProvider]);
-
-  const protocolForType = (modelType: ModelInstance["modelType"]) => {
-    if (preset?.experimental) return "OpenAI Responses";
-    if (modelType === "embedding") return "OpenAI Embeddings";
-    if (modelType === "rerank") return "Cohere Rerank";
-    if (["OpenAI Chat Completions", "OpenAI Responses", "Anthropic Messages"].includes(protocol)) return protocol;
-    return "OpenAI Chat Completions";
-  };
 
   const draftForModel = (model: DiscoveredModel): ModelSelectionDraft => {
     const existing = configuredModels.find((item) => item.modelId === model.id);
-    const inferredType = allowedModelTypes.includes(model.modelType) ? model.modelType : allowedModelTypes[0] ?? "llm";
-    const shouldUseInference = !existing || model.typeConfidence !== "low";
-    const modelType = shouldUseInference ? inferredType : existing.modelType;
-    const corrected = Boolean(existing && existing.modelType !== modelType);
+    const modelType = model.modelType;
+    const expectedProtocol = protocolForProviderModel(preset ?? undefined, modelType, model.id, protocol);
+    const corrected = Boolean(existing && (existing.modelType !== modelType || existing.protocol !== expectedProtocol));
     return {
       id: model.id,
       name: existing?.name ?? model.name ?? model.id,
       modelType,
-      protocol: existing && !corrected ? existing.protocol : protocolForType(modelType),
-      vectorDimension: existing?.vectorDimension ? String(existing.vectorDimension) : "",
-      typeConfidence: existing ? "high" : model.typeConfidence,
+      protocol: expectedProtocol,
+      vectorDimension: existing?.vectorDimension ? String(existing.vectorDimension) : model.vectorDimension ? String(model.vectorDimension) : "",
+      typeConfidence: model.typeConfidence,
       typeSource: corrected ? "corrected" : existing ? "saved" : "automatic",
     };
   };
@@ -826,6 +838,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
     if (!preset || !name.trim() || !baseUrl.trim() || (!configuredProvider && !apiKey.trim())) return;
     setDiscovering(true);
     setDiscoveryError(null);
+    setSaveError(null);
     try {
       const result = await discoverProviderModels({
         providerId: configuredProvider?.id,
@@ -843,6 +856,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
         }
       });
       setSelectedModels(existingSelections);
+      setExpandedGroups({});
       setSearchQuery("");
       setManualMode(result.models.length === 0);
       setStep("models");
@@ -854,6 +868,7 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
   };
 
   const toggleModel = (model: DiscoveredModel, checked: boolean) => {
+    setSaveError(null);
     setSelectedModels((current) => {
       if (checked) return { ...current, [model.id]: draftForModel(model) };
       const next = { ...current };
@@ -873,17 +888,27 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
     const id = manualModelId.trim();
     if (!id) return;
     const inferred = inferModelTypeFromId(id);
-    const model: DiscoveredModel = { id, name: id, modelType: inferred.modelType, typeConfidence: inferred.confidence };
+    const model: DiscoveredModel = { id, name: id, modelType: inferred.modelType, typeConfidence: inferred.confidence, vectorDimension: null };
     setDiscoveredModels((current) => current.some((item) => item.id === id) ? current : [...current, model].sort((a, b) => a.id.localeCompare(b.id)));
     setSelectedModels((current) => ({ ...current, [id]: current[id] ?? draftForModel(model) }));
+    setExpandedGroups((current) => ({ ...current, [inferred.modelType]: true }));
     setManualModelId("");
   };
 
   const submit = async () => {
     const selections = Object.values(selectedModels);
     if (!preset || !name.trim() || !baseUrl.trim() || (!configuredProvider && !apiKey.trim())) return;
-    if (!configuredProvider && selections.length === 0) return;
-    if (selections.some((model) => model.modelType === "embedding" && !Number(model.vectorDimension))) return;
+    if (!configuredProvider && selections.length === 0) {
+      setSaveError("请至少选择一个模型后再保存。");
+      return;
+    }
+    const missingDimension = selections.find((model) => model.modelType === "embedding" && !Number(model.vectorDimension));
+    if (missingDimension) {
+      setExpandedGroups((current) => ({ ...current, embedding: true }));
+      setSaveError(`模型 ${missingDimension.name} 缺少向量维度，请填写后保存。`);
+      return;
+    }
+    setSaveError(null);
     setSaving(true);
     let createdProviderId: string | null = null;
     try {
@@ -904,8 +929,13 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
           timeoutSeconds: existing?.timeoutSeconds ?? 30,
           enabled: existing?.enabled ?? true,
         };
-        if (existing) await updateModel(existing.id, modelInput);
-        else await createModel(modelInput);
+        try {
+          if (existing) await updateModel(existing.id, modelInput);
+          else await createModel(modelInput);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "未知错误";
+          throw new Error(`模型 ${selection.name} 保存失败：${reason}`);
+        }
       }
       await onSaved();
       onOpenChange(false);
@@ -924,27 +954,32 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
     const query = searchQuery.trim().toLocaleLowerCase();
     return !query || model.id.toLocaleLowerCase().includes(query) || model.name.toLocaleLowerCase().includes(query);
   });
-  const visibleModels = filteredModels.slice(0, 100);
+  const visibleModels = filteredModels;
+  const groupedModels = (["llm", "embedding", "rerank", "vision"] as const).map((modelType) => ({
+    modelType,
+    models: visibleModels.filter((model) => (selectedModels[model.id]?.modelType ?? model.modelType) === modelType),
+  })).filter((group) => group.models.length > 0);
   const canDiscover = Boolean(name.trim() && baseUrl.trim() && (configuredProvider || apiKey.trim()));
   const canSave = Boolean(
     name.trim()
     && baseUrl.trim()
     && (configuredProvider || apiKey.trim())
     && (configuredProvider || selections.length > 0)
-    && selections.every((model) => model.modelType !== "embedding" || Number(model.vectorDimension) > 0)
   );
 
-  return <Modal open={Boolean(preset)} onOpenChange={onOpenChange} title={configuredProvider ? `重新配置${configuredProvider.name}` : preset?.custom ? "添加自定义供应商" : `配置${preset?.name ?? "供应商"}`} description="填写连接信息后，系统将从供应商实时获取可用模型。" width="wide">
+  return <Modal open={Boolean(preset)} onOpenChange={onOpenChange} title={configuredProvider ? `重新配置${configuredProvider.name}` : preset?.custom ? "添加自定义供应商" : `配置${preset?.name ?? "供应商"}`} description={preset?.custom ? "填写连接信息后，系统将从供应商实时获取可用模型。" : "系统已内置官方连接配置，填写 API Key 即可获取可用模型。"} width="wide">
     <div className="provider-setup-progress" aria-label={`配置进度：第 ${step === "credentials" ? 1 : 2} 步，共 2 步`}>
       <span className="is-active"><b>1</b>连接供应商</span>
       <span className={step === "models" ? "is-active" : ""}><b>2</b>选择模型</span>
     </div>
     {step === "credentials" ? <>
       <div className="modal-form">
-        <label><span>供应商名称（必填）</span><input autoFocus value={name} readOnly={!preset?.custom} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label>
-        <label><span>Base URL（必填）</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="供应商 API 地址" /></label>
-        <label><span>API Key{configuredProvider ? "（留空则使用已保存密钥）" : "（必填）"}</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configuredProvider ? `当前密钥 ${configuredProvider.apiKeyMasked}` : "输入 API Key"} autoComplete="new-password" /></label>
-        <label><span>接口协议（必填）</span><select value={protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label>
+        {preset?.custom ? <>
+          <label><span>供应商名称（必填）</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="输入供应商名称" /></label>
+          <label><span>Base URL（必填）</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="供应商 API 地址" /></label>
+        </> : null}
+        <label><span>API Key{configuredProvider ? "（留空则使用已保存密钥）" : "（必填）"}</span><input autoFocus={!preset?.custom} type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={configuredProvider ? `当前密钥 ${configuredProvider.apiKeyMasked}` : "输入 API Key"} autoComplete="new-password" /></label>
+        {preset?.custom ? <label><span>接口协议（必填）</span><select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label> : null}
         {preset?.experimental ? <div className="provider-warning"><ShieldAlert size={15} aria-hidden="true" /><span>Kimi Code 会检测普通问答、流式输出和 usage 返回；不用于向量或重排。</span></div> : null}
         {discoveryError ? <div className="model-discovery-error" role="alert"><div><strong>未能获取模型</strong><span>{discoveryError}</span></div><div><Button icon={RefreshCw} onClick={discover} disabled={discovering}>{discovering ? "重新获取中…" : "重新获取"}</Button><Button variant="ghost" onClick={() => { setManualMode(true); setStep("models"); }}>手动填写模型 ID</Button></div></div> : null}
       </div>
@@ -955,20 +990,27 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
         <span aria-live="polite">已获取 {discoveredModels.length} 个模型，已选择 {selections.length} 个</span>
       </div>
       {discoveredModels.length ? <div className="model-discovery-search"><Search size={16} aria-hidden="true" /><input aria-label="搜索已获取的模型" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索模型 ID 或名称" /></div> : null}
-      {discoveryTruncated ? <div className="provider-warning" role="status"><ShieldAlert size={15} aria-hidden="true" /><span>供应商仍有更多模型。本次最多显示 500 个，可使用搜索或手动填写模型 ID。</span></div> : null}
-      {visibleModels.length ? <div className="model-discovery-list" aria-label="供应商模型列表">
-        {visibleModels.map((model) => {
-          const draft = selectedModels[model.id];
-          const isSaved = configuredModels.some((item) => item.modelId === model.id);
-          return <div className={cn("model-discovery-item", draft && "is-selected")} key={model.id}>
-            <label className="model-discovery-check"><input type="checkbox" checked={Boolean(draft)} onChange={(event) => toggleModel(model, event.target.checked)} /><span><strong>{model.name}</strong>{model.name !== model.id ? <small>{model.id}</small> : null}</span>{isSaved ? <em>已保存</em> : null}</label>
-            {draft ? <div className="model-discovery-config"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(draft.modelType)} <small>{draft.typeSource === "saved" ? "已保存配置" : draft.typeSource === "corrected" ? "自动修正" : draft.typeSource === "adjusted" ? "已调整" : draft.typeConfidence === "low" ? "自动归类" : "自动识别"}</small></strong></div><div className="model-auto-value"><span>调用协议</span><strong>{draft.protocol}</strong></div>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => updateModelDraft(model.id, { vectorDimension: event.target.value })} /></label> : null}<details className="model-advanced-settings"><summary>调整识别结果</summary><div><label><span>模型类别</span><select value={draft.modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const modelType = event.target.value as ModelInstance["modelType"]; updateModelDraft(model.id, { modelType, protocol: protocolForType(modelType), vectorDimension: modelType === "embedding" ? draft.vectorDimension : "", typeSource: "adjusted" }); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{modelTypeLabel(type)}</option>)}</select></label><label><span>调用协议</span><select value={draft.protocol} disabled={Boolean(preset?.experimental)} onChange={(event) => updateModelDraft(model.id, { protocol: event.target.value })}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div></details></div> : null}
-          </div>;
+      {discoveryTruncated ? <div className="provider-warning" role="status"><ShieldAlert size={15} aria-hidden="true" /><span>供应商模型目录未能完成全部分页，可重新获取或手动填写模型 ID。</span></div> : null}
+      {visibleModels.length ? <div className="model-discovery-list" aria-label="按类别分组的供应商模型">
+        {groupedModels.map((group) => {
+          const expanded = Boolean(searchQuery.trim()) || Boolean(expandedGroups[group.modelType]);
+          const selectedCount = group.models.filter((model) => selectedModels[model.id]).length;
+          return <section className="model-discovery-group" key={group.modelType}>
+          <h3><button type="button" aria-expanded={expanded} aria-controls={`model-group-${group.modelType}`} onClick={() => setExpandedGroups((current) => ({ ...current, [group.modelType]: !expanded }))}><ChevronRight className={expanded ? "is-expanded" : ""} size={16} aria-hidden="true" /><strong>{modelTypeLabel(group.modelType)}</strong><span>{group.models.length}</span>{selectedCount ? <small>已选 {selectedCount}</small> : null}</button></h3>
+          {expanded ? <div className="model-discovery-group-items" id={`model-group-${group.modelType}`}>{group.models.map((model) => {
+            const draft = selectedModels[model.id];
+            const isSaved = configuredModels.some((item) => item.modelId === model.id);
+            return <div className={cn("model-discovery-item", draft && "is-selected")} key={model.id}>
+              <label className="model-discovery-check"><input type="checkbox" checked={Boolean(draft)} onChange={(event) => toggleModel(model, event.target.checked)} /><span><strong>{model.name}</strong>{model.name !== model.id ? <small>{model.id}</small> : null}</span>{isSaved ? <em>已保存</em> : null}</label>
+              {draft ? <div className="model-discovery-config"><div className="model-auto-value"><span>调用协议</span><strong>{draft.protocol}</strong></div>{draft.modelType === "embedding" ? <label><span>向量维度（必填）</span><input type="number" min="1" value={draft.vectorDimension} onChange={(event) => { updateModelDraft(model.id, { vectorDimension: event.target.value }); setSaveError(null); }} /></label> : null}{draft.typeSource === "corrected" ? <p className="model-correction-note" role="status">保存后将自动纠正类别或协议</p> : null}</div> : null}
+            </div>;
+          })}</div> : null}
+        </section>;
         })}
       </div> : <div className="model-discovery-empty" role="status">{discoveredModels.length ? "没有符合搜索条件的模型。" : "供应商未返回模型，可重新获取或手动填写模型 ID。"}</div>}
-      {filteredModels.length > visibleModels.length ? <p className="model-preserve-note" role="status">当前显示前 100 个匹配模型，可继续输入关键词缩小范围。</p> : null}
       {configuredModels.length ? <p className="model-preserve-note">已保存的模型不会因取消勾选或本次未返回而被删除。</p> : null}
       <div className="manual-model-section"><button type="button" className="text-action" onClick={() => setManualMode((current) => !current)} aria-expanded={manualMode}>{manualMode ? "收起手动填写" : "手动填写模型 ID"}</button>{manualMode ? <div className="manual-model-input"><label><span>模型 ID</span><input value={manualModelId} onChange={(event) => setManualModelId(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); addManualModel(); } }} placeholder="输入供应商公布的模型 ID" /></label><Button onClick={addManualModel} disabled={!manualModelId.trim()}>添加并选中</Button></div> : null}</div>
+      {saveError ? <div className="model-save-error" role="alert"><ShieldAlert size={16} aria-hidden="true" /><span>{saveError}</span></div> : null}
       <div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={!canSave || saving}>{saving ? "保存中…" : "保存配置"}</Button></div>
     </>}
   </Modal>;
@@ -977,14 +1019,14 @@ function AddProviderModal({ preset, configuredProvider, configuredModels, onOpen
 function AddModelModal({ open, providers, onOpenChange, setToast, setErrorToast, onSaved }: { open: boolean; providers: ModelProvider[]; onOpenChange: (open: boolean) => void; setToast: (message: string) => void; setErrorToast: (message: string) => void; onSaved: () => Promise<void> }) {
   const [providerId, setProviderId] = useState("");
   const [modelId, setModelId] = useState("");
-  const [modelType, setModelType] = useState<ModelInstance["modelType"]>("llm");
-  const [protocol, setProtocol] = useState("OpenAI Chat Completions");
   const [dimension, setDimension] = useState("");
   const [saving, setSaving] = useState(false);
   const selectedProvider = providers.find((provider) => provider.id === providerId);
   const selectedPreset = providerPresets.find((preset) => preset.id === selectedProvider?.presetId);
-  const allowedModelTypes = supportedModelTypes(selectedPreset);
-  useEffect(() => { if (open) { const provider = providers[0]; const preset = providerPresets.find((item) => item.id === provider?.presetId); const initialType = supportedModelTypes(preset)[0] ?? "llm"; setProviderId(provider?.id ?? ""); setModelId(""); setModelType(initialType); setProtocol(provider?.defaultProtocol ?? defaultProtocolForType(initialType)); setDimension(""); } }, [open, providers]);
+  const inferredType = inferModelTypeFromId(modelId).modelType;
+  const modelType = selectedPreset?.experimental ? "llm" : inferredType;
+  const protocol = protocolForProviderModel(selectedPreset, modelType, modelId, selectedProvider?.defaultProtocol ?? defaultProtocolForType(modelType));
+  useEffect(() => { if (open) { setProviderId(providers[0]?.id ?? ""); setModelId(""); setDimension(""); } }, [open, providers]);
   const submit = async () => {
     if (!providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))) return;
     setSaving(true);
@@ -999,7 +1041,7 @@ function AddModelModal({ open, providers, onOpenChange, setToast, setErrorToast,
       setSaving(false);
     }
   };
-  return <Modal open={open} onOpenChange={onOpenChange} title="添加模型实例" description="同一供应商可以配置多个 LLM、Embedding、Rerank 或视觉模型。"><div className="modal-form"><label><span>供应商</span><select value={providerId} onChange={(event) => { const provider = providers.find((item) => item.id === event.target.value); const preset = providerPresets.find((item) => item.id === provider?.presetId); const initialType = supportedModelTypes(preset)[0] ?? "llm"; setProviderId(event.target.value); setModelType(initialType); setProtocol(provider?.defaultProtocol ?? defaultProtocolForType(initialType)); }}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>模型 ID</span><input autoFocus value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="填写供应商公布的模型 ID" /></label><div className="form-row"><label><span>模型类型</span><select value={modelType} disabled={allowedModelTypes.length === 1} onChange={(event) => { const nextType = event.target.value as ModelInstance["modelType"]; setModelType(nextType); setProtocol(defaultProtocolForType(nextType)); }}>{allowedModelTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label><span>协议</span><select value={protocol} disabled={selectedPreset?.experimental} onChange={(event) => setProtocol(event.target.value)}><option>OpenAI Chat Completions</option><option>OpenAI Responses</option><option>OpenAI Embeddings</option><option>Anthropic Messages</option><option>Cohere Rerank</option></select></label></div>{modelType === "embedding" ? <label><span>向量维度</span><input type="number" min="1" value={dimension} onChange={(event) => setDimension(event.target.value)} /></label> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={saving || !providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))}>{saving ? "添加中…" : "添加模型"}</Button></div></Modal>;
+  return <Modal open={open} onOpenChange={onOpenChange} title="添加模型实例" description="输入模型 ID 后，系统自动识别类别并匹配调用协议。"><div className="modal-form"><label><span>供应商</span><select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>模型 ID</span><input autoFocus value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="填写供应商公布的模型 ID" /></label>{modelId.trim() ? <div className="form-row"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(modelType)}</strong></div><div className="model-auto-value"><span>调用协议</span><strong>{protocol}</strong></div></div> : null}{modelType === "embedding" && modelId.trim() ? <label><span>向量维度（必填）</span><input type="number" min="1" value={dimension} onChange={(event) => setDimension(event.target.value)} /></label> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={saving || !providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))}>{saving ? "添加中…" : "添加模型"}</Button></div></Modal>;
 }
 
 function LogsView() {

@@ -1,5 +1,7 @@
 import json
+import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -39,6 +41,7 @@ class DiscoveryTarget:
     api_key: str
     protocol: str
     timeout_seconds: float = 20.0
+    preset_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -47,6 +50,7 @@ class RemoteModel:
     name: str
     model_type: ModelType
     type_confidence: Literal["high", "medium", "low"]
+    vector_dimension: int | None = None
 
 
 @dataclass(slots=True)
@@ -124,6 +128,20 @@ def _model_entries(payload: Any) -> tuple[list[Any], bool]:
         entries = entries.get("models") or entries.get("data")
     if not isinstance(entries, list):
         entries = payload.get("models")
+    if not isinstance(entries, list) and isinstance(payload.get("output"), dict):
+        output = payload["output"]
+        entries = output.get("models")
+        total = output.get("total")
+        page_no = output.get("page_no", 1)
+        page_size = output.get("page_size", 20)
+        has_more = (
+            isinstance(total, int)
+            and isinstance(page_no, int)
+            and isinstance(page_size, int)
+            and total > page_no * page_size
+        )
+        if isinstance(entries, list):
+            return entries, has_more
     if not isinstance(entries, list):
         raise HealthCheckFailure("响应缺少 data 或 models 模型列表")
     return entries, bool(payload.get("has_more") or payload.get("next") or payload.get("next_page"))
@@ -191,15 +209,25 @@ def infer_model_type(
     model_id: str,
     entry: dict[str, Any] | None = None,
 ) -> tuple[ModelType, Literal["high", "medium", "low"]]:
-    if entry:
-        metadata_type = _type_from_text(_metadata_text(entry))
-        if metadata_type is not None:
-            return metadata_type, "high"
-
     normalized_id = model_id.casefold().replace("_", "-")
     id_type = _type_from_text(normalized_id)
     if id_type is not None:
         return id_type, "medium"
+
+    if entry:
+        capabilities = entry.get("capabilities")
+        if isinstance(capabilities, list):
+            capability_codes = {str(item).casefold() for item in capabilities}
+            if capability_codes.intersection({"tr", "me"}):
+                return ModelType.EMBEDDING, "high"
+            if "vu" in capability_codes:
+                return ModelType.VISION, "high"
+            if capability_codes.intersection({"tg", "reasoning"}):
+                return ModelType.LLM, "high"
+        metadata_type = _type_from_text(_metadata_text(entry))
+        if metadata_type is not None:
+            return metadata_type, "high"
+
     if any(keyword in normalized_id for keyword in ("bge-", "/bge", "gte-", "/gte", "e5-", "/e5", "m3e")):
         return ModelType.EMBEDDING, "medium"
     if any(marker in normalized_id for marker in ("-vl", "/vl", "vl-", "qwen-vl", "llava")):
@@ -207,7 +235,98 @@ def infer_model_type(
     return ModelType.LLM, "low"
 
 
-def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
+def _default_vector_dimension(model_id: str, entry: dict[str, Any] | None = None) -> int | None:
+    if entry:
+        for source in (entry, entry.get("model_info")):
+            if not isinstance(source, dict):
+                continue
+            for key in ("default_dimension", "embedding_dimension", "vector_dimension", "dimension"):
+                value = source.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
+
+    normalized = model_id.casefold()
+    exact_dimensions = {
+        "qwen3.7-text-embedding": 1024,
+        "qwen3.7-text-embedding-flash": 1024,
+        "text-embedding-v4": 1024,
+        "text-embedding-v3": 1024,
+        "text-embedding-v2": 1536,
+        "text-embedding-v1": 1536,
+        "qwen3-vl-embedding": 2560,
+        "qwen2.5-vl-embedding": 1024,
+        "tongyi-embedding-vision-plus-2026-03-06": 1152,
+        "tongyi-embedding-vision-flash-2026-03-06": 768,
+        "tongyi-embedding-vision-plus": 1152,
+        "tongyi-embedding-vision-flash": 768,
+        "multimodal-embedding-v1": 1024,
+    }
+    return exact_dimensions.get(normalized)
+
+
+def _parse_offline_time(value: Any) -> datetime | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return datetime.fromtimestamp(timestamp, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(normalized, pattern).replace(tzinfo=UTC)
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _is_retired_model(model_id: str, entry: dict[str, Any] | None = None) -> bool:
+    if model_id.casefold() == "gte-rerank":
+        return True
+    if not entry:
+        return False
+    if any(entry.get(key) is True for key in ("deprecated", "retired", "disabled", "offline")):
+        return True
+    retired_statuses = {"deprecated", "retired", "offline", "disabled", "decommissioned", "deprecated_model"}
+    for key in ("status", "lifecycle", "model_status", "inference_status"):
+        if str(entry.get(key) or "").casefold().replace("-", "_") in retired_statuses:
+            return True
+    for source in (entry, entry.get("inference_offline_info"), entry.get("deprecation_info")):
+        if not isinstance(source, dict):
+            continue
+        offline_time = _parse_offline_time(
+            source.get("offline_time") or source.get("retired_at") or source.get("deprecation_time")
+        )
+        if offline_time is not None and offline_time <= datetime.now(UTC):
+            return True
+    return False
+
+
+def _is_supported_catalog_model(model_id: str, entry: dict[str, Any] | None) -> bool:
+    if not entry or not isinstance(entry.get("capabilities"), list):
+        return True
+    capability_codes = {str(item).casefold() for item in entry["capabilities"]}
+    supported_codes = {"tg", "reasoning", "vu", "tr", "me"}
+    return bool(capability_codes.intersection(supported_codes)) or _type_from_text(model_id) in {
+        ModelType.EMBEDDING,
+        ModelType.RERANK,
+    }
+
+
+def _parse_models(
+    payload: Any,
+    *,
+    limit: int | None = None,
+    filter_catalog_capabilities: bool = False,
+) -> DiscoveryResult:
     entries, has_more = _model_entries(payload)
     models_by_id: dict[str, RemoteModel] = {}
     for entry in entries:
@@ -216,7 +335,7 @@ def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
         if isinstance(entry, str):
             model_id = entry.strip()
         elif isinstance(entry, dict):
-            raw_id = entry.get("id") or entry.get("model_id")
+            raw_id = entry.get("id") or entry.get("model_id") or entry.get("model")
             if isinstance(raw_id, str):
                 model_id = raw_id.strip()
             raw_name = entry.get("display_name") or entry.get("name")
@@ -224,7 +343,12 @@ def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
                 model_name = raw_name.strip()
         if not model_id:
             continue
-        model_type, type_confidence = infer_model_type(model_id, entry if isinstance(entry, dict) else None)
+        metadata = entry if isinstance(entry, dict) else None
+        if _is_retired_model(model_id, metadata):
+            continue
+        if filter_catalog_capabilities and not _is_supported_catalog_model(model_id, metadata):
+            continue
+        model_type, type_confidence = infer_model_type(model_id, metadata)
         models_by_id.setdefault(
             model_id,
             RemoteModel(
@@ -232,12 +356,13 @@ def _parse_models(payload: Any, *, limit: int = 500) -> DiscoveryResult:
                 name=model_name or model_id,
                 model_type=model_type,
                 type_confidence=type_confidence,
+                vector_dimension=_default_vector_dimension(model_id, metadata) if model_type == ModelType.EMBEDDING else None,
             ),
         )
 
     models = sorted(models_by_id.values(), key=lambda item: (item.id.casefold(), item.id))
-    truncated = has_more or len(models) > limit
-    return DiscoveryResult(models=models[:limit], truncated=truncated)
+    truncated = has_more or (limit is not None and len(models) > limit)
+    return DiscoveryResult(models=models if limit is None else models[:limit], truncated=truncated)
 
 
 async def discover_models(
@@ -252,6 +377,10 @@ async def discover_models(
             trust_env=False,
         )
     try:
+        if target.preset_id == "dashscope":
+            catalog_url = _dashscope_catalog_url(target.base_url)
+            if catalog_url:
+                return await _discover_dashscope_models(target, client, catalog_url)
         response = await client.get(
             _endpoint(target.base_url, "models"),
             headers=_discovery_headers(target.protocol, target.api_key),
@@ -270,6 +399,59 @@ async def discover_models(
     finally:
         if owns_client:
             await client.aclose()
+
+
+def _dashscope_catalog_url(base_url: str) -> str | None:
+    parsed = urlsplit(base_url)
+    host = parsed.hostname or ""
+    supported_hosts = {
+        "dashscope.aliyuncs.com",
+        "dashscope-intl.aliyuncs.com",
+        "cn-hongkong.dashscope.aliyuncs.com",
+    }
+    if host not in supported_hosts and not host.endswith(".maas.aliyuncs.com"):
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, "/api/v1/models", "", ""))
+
+
+async def _discover_dashscope_models(
+    target: DiscoveryTarget,
+    client: httpx.AsyncClient,
+    catalog_url: str,
+) -> DiscoveryResult:
+    models_by_id: dict[str, RemoteModel] = {}
+    truncated = False
+    page_no = 1
+    max_pages = 100
+    while page_no <= max_pages:
+        response = await client.get(
+            catalog_url,
+            params={"page_no": page_no, "page_size": 100},
+            headers=_discovery_headers(target.protocol, target.api_key),
+        )
+        if response.status_code >= 400:
+            raise HealthCheckFailure(_error_message(response, target.api_key))
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HealthCheckFailure("通义模型目录没有返回有效 JSON") from exc
+        result = _parse_models(payload, filter_catalog_capabilities=True)
+        for model in result.models:
+            models_by_id.setdefault(model.id, model)
+
+        output = payload.get("output") if isinstance(payload, dict) else None
+        total = output.get("total") if isinstance(output, dict) else None
+        page_size = output.get("page_size") if isinstance(output, dict) else None
+        total_pages = math.ceil(total / page_size) if isinstance(total, int) and isinstance(page_size, int) and page_size > 0 else None
+        has_next_page = page_no < total_pages if total_pages is not None else result.truncated
+        if not has_next_page:
+            truncated = False
+            break
+        page_no += 1
+    else:
+        truncated = True
+    models = sorted(models_by_id.values(), key=lambda item: (item.id.casefold(), item.id))
+    return DiscoveryResult(models=models, truncated=truncated)
 
 
 def _request_for(target: ProbeTarget, *, stream: bool = False) -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -296,6 +478,16 @@ def _request_for(target: ProbeTarget, *, stream: bool = False) -> tuple[str, dic
             "model": target.model_id,
             "input": ["connection test"],
         }
+    if target.protocol == "DashScope Text Embeddings":
+        return _dashscope_native_url(target.base_url, "services/embeddings/text-embedding/text-embedding"), bearer_headers, {
+            "model": target.model_id,
+            "input": ["connection test"],
+        }
+    if target.protocol == "DashScope Multimodal Embeddings":
+        return _dashscope_native_url(target.base_url, "services/embeddings/multimodal-embedding/multimodal-embedding"), bearer_headers, {
+            "model": target.model_id,
+            "input": {"contents": [{"text": "connection test"}]},
+        }
     if target.protocol == "Anthropic Messages":
         return _endpoint(target.base_url, "messages"), {
             "x-api-key": target.api_key,
@@ -314,12 +506,27 @@ def _request_for(target: ProbeTarget, *, stream: bool = False) -> tuple[str, dic
             "documents": ["connection test", "unrelated text"],
             "top_n": 1,
         }
+    if target.protocol == "DashScope Rerank":
+        return _dashscope_native_url(target.base_url, "services/rerank/text-rerank/text-rerank"), bearer_headers, {
+            "model": target.model_id,
+            "input": {
+                "query": "connection test",
+                "documents": ["connection test", "unrelated text"],
+            },
+            "parameters": {"top_n": 1},
+        }
     raise HealthCheckFailure(f"暂不支持协议：{target.protocol}")
 
 
 def _validate_payload(protocol: str, payload: Any) -> None:
     if not isinstance(payload, dict):
         raise HealthCheckFailure("供应商返回的 JSON 结构无效")
+    if protocol in {"DashScope Text Embeddings", "DashScope Multimodal Embeddings", "DashScope Rerank"}:
+        output = payload.get("output")
+        expected = "results" if protocol == "DashScope Rerank" else "embeddings"
+        if not isinstance(output, dict) or expected not in output:
+            raise HealthCheckFailure(f"响应缺少 output.{expected} 字段")
+        return
     expected = {
         "OpenAI Chat Completions": "choices",
         "OpenAI Responses": "output",
@@ -329,6 +536,11 @@ def _validate_payload(protocol: str, payload: Any) -> None:
     }[protocol]
     if expected not in payload:
         raise HealthCheckFailure(f"响应缺少 {expected} 字段")
+
+
+def _dashscope_native_url(base_url: str, suffix: str) -> str:
+    parsed = urlsplit(base_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, f"/api/v1/{suffix.lstrip('/')}", "", ""))
 
 
 async def probe_model(target: ProbeTarget, client: httpx.AsyncClient | None = None) -> ProbeResult:

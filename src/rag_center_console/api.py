@@ -150,6 +150,7 @@ async def discover_provider_models(
                 base_url=base_url,
                 api_key=api_key,
                 protocol=protocol,
+                preset_id=provider.preset_id if provider else payload.preset_id,
             )
         )
     except HealthCheckFailure as exc:
@@ -161,6 +162,7 @@ async def discover_provider_models(
                 name=model.name,
                 model_type=model.model_type,
                 type_confidence=model.type_confidence,
+                vector_dimension=model.vector_dimension,
             )
             for model in result.models
         ],

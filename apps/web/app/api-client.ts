@@ -70,6 +70,7 @@ export type DiscoveredModel = {
   name: string;
   modelType: ModelInstance["modelType"];
   typeConfidence: "high" | "medium" | "low";
+  vectorDimension: number | null;
 };
 
 export type ModelDiscoveryInput = {
@@ -200,7 +201,7 @@ export async function discoverProviderModels(input: ModelDiscoveryInput): Promis
   if (input.providerId) body.provider_id = input.providerId;
   if (input.apiKey) body.api_key = input.apiKey;
   const result = await apiRequest<{
-    models: Array<{ id: string; name: string; model_type: ModelInstance["modelType"]; type_confidence: "high" | "medium" | "low" }>;
+    models: Array<{ id: string; name: string; model_type: ModelInstance["modelType"]; type_confidence: "high" | "medium" | "low"; vector_dimension: number | null }>;
     truncated: boolean;
   }>("/providers/discover-models", {
     method: "POST",
@@ -212,6 +213,7 @@ export async function discoverProviderModels(input: ModelDiscoveryInput): Promis
       name: model.name,
       modelType: model.model_type,
       typeConfidence: model.type_confidence,
+      vectorDimension: model.vector_dimension,
     })),
     truncated: result.truncated,
   };

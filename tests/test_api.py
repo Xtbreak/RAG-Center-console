@@ -155,6 +155,7 @@ def test_new_provider_can_discover_models_before_saving(client, monkeypatch):
                 "name": "Qwen embedding",
                 "model_type": "embedding",
                 "type_confidence": "medium",
+                "vector_dimension": None,
             }
         ],
         "truncated": False,
