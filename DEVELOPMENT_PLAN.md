@@ -75,7 +75,10 @@
 ### 5.2 配置与安全
 
 - 模型配置包括模型 ID、Base URL、上下文长度、向量维度、能力、超时和默认用途。
-- 填写 Base URL、API Key 和协议后，从供应商 `/models` 接口实时获取模型；系统优先根据供应商元数据、其次根据模型 ID 自动识别 LLM、Embedding、Rerank 或 Vision，并匹配调用协议。用户只需选择要启用的模型；识别结果仅在高级设置中允许纠正。获取失败时提供重试和手动填写模型 ID，不使用虚构模型列表。
+- 填写 Base URL、API Key 和协议后，从供应商 `/models` 接口实时获取模型；系统优先根据供应商元数据、其次根据模型 ID 自动识别 LLM、Embedding、Rerank 或 Vision，并匹配调用协议。模型按四类可折叠分组展示，默认收起并显示模型数和已选数，搜索时自动展开匹配结果。用户只需选择要启用的模型，不提供手动类别选择。手动补充模型 ID 时也由系统自动识别类别和协议。获取失败时提供重试和手动填写模型 ID，不使用虚构模型列表。
+- 通义使用官方 `GET /api/v1/models` 模型目录并自动翻页，不依赖 OpenAI 兼容端点的 `/models`；解析 `output.models`、`model` 字段及 `TR/ME/VU/TG` 能力代码，与调用 Base URL 分离。
+- 模型获取阶段过滤已废弃、已退役、已停用及下线时间已到的模型；仍处于服务期、仅公布未来下线时间的模型继续显示。目录中的图片生成、语音等不属于 LLM、Embedding、Rerank、Vision 的模型不进入本系统候选列表。
+- 内置供应商的名称、Base URL 和默认协议由系统预设，用户只需填写 API Key；自定义供应商仍需填写完整连接信息。
 - 所有模型实例提供真实健康检测。
 - 密钥使用环境主密钥加密保存，接口只返回掩码。
 - 日志禁止记录 API Key、Authorization 请求头或其他鉴权值。
@@ -158,6 +161,7 @@ Kimi Code 使用中国区 `https://api.kimi.com/coding/v1`，标记为“实验�
 - [FastGPT 核心功能](https://github.com/labring/fastgpt)
 - [FastGPT 知识库检索方案](https://doc.fastgpt.io/zh-CN/guide/dataset/dataset_engine)
 - [FastGPT 模型配置说明](https://doc.fastgpt.io/zh-CN/self-host/config/model/intro)
+- [阿里云百炼查询模型列表](https://help.aliyun.com/zh/model-studio/list-models)
 - [阿里云文档理解](https://help.aliyun.com/zh/document-mind/product-overview/overview-of-document-understanding)
 - [Kimi Code API 说明](https://www.kimi.com/code/docs/en/)
 - [Qdrant Collections](https://qdrant.tech/documentation/manage-data/collections/)
@@ -170,3 +174,6 @@ Kimi Code 使用中国区 `https://api.kimi.com/coding/v1`，标记为“实验�
 | 2026-10-26 | 建立企业知识库中台 1.0 开发基线 | 已确认 |
 | 2026-10-26 | 供应商配置改为先实时获取模型，再选择模型并保存；失败时允许重试或手动填写 | 用户明确要求 |
 | 2026-10-26 | 模型类别和调用协议改为自动识别，人工调整降级为高级设置 | 用户明确要求 |
+| 2026-10-26 | 移除模型类别手动选择，获取结果直接按 LLM、Embedding、Rerank、Vision 分组；单独添加模型也自动分类 | 用户明确要求 |
+| 2026-10-26 | 内置供应商配置仅保留 API Key，名称、地址和协议由系统预设 | 用户明确要求 |
+| 2026-10-26 | 自动过滤已废弃、已退役和已下线模型，保留仅公布未来下线时间的有效模型 | 用户明确要求 |
