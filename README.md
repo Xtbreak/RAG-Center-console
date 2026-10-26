@@ -4,9 +4,9 @@
 
 ## 当前阶段
 
-阶段 1：可点击高保真前端原型，已完成实现与自测，等待用户确认。
+阶段 2：基础设施、匿名角色会话与模型模块，正在开发。
 
-阶段状态和验收记录以 `DEVELOPMENT_WORKFLOW.md` 为唯一依据。前端原型未经用户确认，不进入后端开发。
+阶段状态和验收记录以 `DEVELOPMENT_WORKFLOW.md` 为唯一依据。
 
 ## 开发文档
 
@@ -16,11 +16,25 @@
 ## 当前工程
 
 - Python 包：`src/rag_center_console`
-- 前端原型：阶段 1 建立于 `apps/web`
+- FastAPI 后端：`src/rag_center_console/main.py`
+- 前端：`apps/web`
+- 基础设施：`docker-compose.yml`
 
 ## 本地启动
 
-前置要求：Node.js 20.9 或更高版本。
+前置要求：Python 3.15、uv、Node.js 20.9 或更高版本。完整基础设施还需要 Docker。
+
+首次运行先从 `.env.example` 创建 `.env`，并生成独立的 `RAG_ENCRYPTION_KEY`。本机不使用 Docker 时，可将 `RAG_DATABASE_URL` 改为 `sqlite:///./data/rag_center.db`。
+
+启动后端：
+
+```bash
+uv sync
+uv run alembic upgrade head
+uv run uvicorn rag_center_console.main:app --host 127.0.0.1 --port 8000
+```
+
+启动前端：
 
 ```bash
 cd apps/web
@@ -28,7 +42,9 @@ npm install
 npm run dev
 ```
 
-浏览器访问 `http://localhost:3000`。当前版本默认以零数据空状态启动，不包含预置业务示例；用户在原型中创建的内容仅保留于当前前端会话。阶段 1 经用户确认前，不开始后端与基础设施开发。
+浏览器访问 `http://localhost:3000`，API 文档位于 `http://localhost:8000/docs`。当前版本默认以零数据空状态启动，不包含预置业务示例。
+
+安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、MinIO、API 和 Web。
 
 质量检查：
 
@@ -36,4 +52,8 @@ npm run dev
 cd apps/web
 npm run typecheck
 npm run build
+```
+
+```bash
+uv run pytest -q
 ```
