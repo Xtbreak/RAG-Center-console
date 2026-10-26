@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Node / Next.js
+node_modules
+.next/
+*.tsbuildinfo
