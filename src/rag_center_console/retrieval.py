@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
 from langchain_core.runnables import RunnableLambda
@@ -37,6 +38,7 @@ from .models import (
     VectorStatus,
 )
 from .security import SecretBox, get_secret_box
+from .telemetry import CallTrace, trace_call
 from .vectorstore import VectorMatch, VectorStore, VectorStoreError, get_vector_store
 
 
@@ -77,6 +79,10 @@ class RetrievalResult:
     insufficient: bool
     rerank_applied: bool
     warnings: list[str] = field(default_factory=list)
+    route_candidates: list[dict[str, Any]] = field(default_factory=list)
+    route_ms: float = 0.0
+    retrieval_ms: float = 0.0
+    rerank_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -86,6 +92,8 @@ class RetrievalServices:
     embed: Callable[..., Awaitable[EmbeddingResult]] = embed_texts
     generate: Callable[..., Awaitable[GenerationResult]] = generate_text
     rerank: Callable[..., Awaitable[RerankResult]] = rerank_texts
+    trace: CallTrace | None = None
+    last_route_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 def default_retrieval_services() -> RetrievalServices:
@@ -102,6 +110,7 @@ def model_target(model: ModelDefinition, secret_box: SecretBox) -> ProbeTarget:
         model_id=model.model_id,
         protocol=model.protocol,
         timeout_seconds=model.timeout_seconds,
+        definition_id=model.id,
     )
 
 
@@ -180,6 +189,7 @@ async def route_knowledge_bases(
     max_selected: int = 3,
     candidate_limit: int = 8,
 ) -> list[RouteSelection]:
+    services.last_route_candidates = []
     bases = list(
         db.scalars(
             select(KnowledgeBase)
@@ -202,10 +212,15 @@ async def route_knowledge_bases(
     ]
     texts = [query, *(profiles[kb.id] for kb in stale)]
     try:
-        embedded = await services.embed(
-            model_target(embedding_model, services.secret_box),
-            texts,
-            expected_dimension=embedding_model.vector_dimension,
+        target = model_target(embedding_model, services.secret_box)
+        embedded = await trace_call(
+            services.trace,
+            target,
+            "routing_embedding",
+            lambda: services.embed(target, texts, expected_dimension=embedding_model.vector_dimension),
+            input_text="\n".join(texts),
+            input_context={"query": query, "knowledge_profiles": texts[1:]},
+            output_text=lambda result: json.dumps({"vector_count": len(result.vectors), "usage": result.usage}, ensure_ascii=False),
         )
     except HealthCheckFailure as exc:
         raise RetrievalError(f"知识库路由向量化失败：{exc}") from exc
@@ -238,12 +253,17 @@ async def route_knowledge_bases(
         }
         for kb, score, _, _ in candidates
     ]
+    services.last_route_candidates = [
+        {"knowledge_base_id": kb.id, "name": kb.name, "score": round(score, 6)}
+        for kb, score, _, _ in candidates
+    ]
     messages = [
         {
             "role": "system",
             "content": (
                 "你是企业知识库路由器。只能从候选知识库中选择与问题直接相关的知识库，最多选择 "
-                f"{max_selected} 个；没有相关知识库时返回空数组。只输出 JSON："
+                f"{max_selected} 个；没有相关知识库时返回空数组。不得仅凭通用词或主题相近选库；"
+                "问题中的主体、地点、产品或限定条件未出现在候选资料中时，应判定为不相关。只输出 JSON："
                 '{"selected_ids":["id"],"reasons":{"id":"简短原因"}}。'
             ),
         },
@@ -253,8 +273,15 @@ async def route_knowledge_bases(
         },
     ]
     try:
-        generated = await services.generate(
-            model_target(llm_model, services.secret_box), messages, max_tokens=500, temperature=0, json_mode=True
+        target = model_target(llm_model, services.secret_box)
+        generated = await trace_call(
+            services.trace,
+            target,
+            "routing_llm",
+            lambda: services.generate(target, messages, max_tokens=500, temperature=0, json_mode=True),
+            input_text=json.dumps(messages, ensure_ascii=False),
+            output_text=lambda result: result.text,
+            input_context=messages,
         )
         selected_ids, reasons = _parse_route_json(generated.text)
     except (HealthCheckFailure, ValueError, json.JSONDecodeError) as exc:
@@ -275,6 +302,8 @@ async def route_knowledge_bases(
         )
         if len(selections) >= max_selected:
             break
+    if not selections:
+        return _content_route_fallback(db, query, candidate_map, max_selected=max_selected)
     return selections
 
 
@@ -299,6 +328,46 @@ def _query_terms(query: str) -> list[str]:
     counts = Counter(tokenize(query))
     # 优先较长且非纯单字的词，限制 SQL 条件数量。
     return [term for term, _ in sorted(counts.items(), key=lambda item: (-len(item[0]), -item[1], item[0]))[:8]]
+
+
+def _content_route_fallback(
+    db: Session,
+    query: str,
+    candidates: dict[str, tuple[KnowledgeBase, float]],
+    *,
+    max_selected: int,
+) -> list[RouteSelection]:
+    terms = _query_terms(query)
+    if len(terms) < 2:
+        return []
+    matched_by_base: list[tuple[KnowledgeBase, float, float]] = []
+    for kb, recall_score in candidates.values():
+        matched = {
+            term
+            for term in terms
+            if db.scalar(
+                select(Chunk.id)
+                .where(
+                    Chunk.knowledge_base_id == kb.id,
+                    Chunk.vector_status == VectorStatus.INDEXED.value,
+                    Chunk.content.ilike(f"%{term}%"),
+                )
+                .limit(1)
+            )
+        }
+        coverage = len(matched) / len(terms)
+        if len(matched) >= 2 and coverage >= 0.6 and any(len(term) > 1 for term in matched):
+            matched_by_base.append((kb, recall_score, coverage))
+    matched_by_base.sort(key=lambda item: (item[2], item[1]), reverse=True)
+    return [
+        RouteSelection(
+            knowledge_base_id=kb.id,
+            name=kb.name,
+            score=round(coverage, 6),
+            reason=f"路由模型未选库，文档内容关键词覆盖 {coverage:.0%}，执行回退检索",
+        )
+        for kb, _, coverage in matched_by_base[:max_selected]
+    ]
 
 
 def _bm25_scores(query: str, chunks: list[Chunk], corpus_size: int) -> dict[str, float]:
@@ -353,8 +422,14 @@ async def _retrieve_one_base(
     if model is None or not model.enabled:
         raise RetrievalError(f"知识库“{kb.name}”绑定的 Embedding 模型不可用")
     try:
-        embedded = await services.embed(
-            model_target(model, services.secret_box), [query], expected_dimension=kb.vector_dimension
+        target = model_target(model, services.secret_box)
+        embedded = await trace_call(
+            services.trace,
+            target,
+            "knowledge_embedding",
+            lambda: services.embed(target, [query], expected_dimension=kb.vector_dimension),
+            input_text=query,
+            output_text=lambda result: json.dumps({"vector_count": len(result.vectors), "usage": result.usage}, ensure_ascii=False),
         )
         dense_matches = services.vector_store.search(
             kb.collection_name, embedded.vectors[0], limit=max(per_base_limit * 3, 20)
@@ -451,14 +526,21 @@ async def retrieve_across_bases(
         hit.rrf_score = round(cross_scores[hit.chunk_id], 8)
 
     rerank_applied = False
+    rerank_ms = 0.0
     rerank_model = get_default_model(db, "default_rerank", ModelType.RERANK, required=False)
     if rerank_model and ranked:
+        rerank_started = perf_counter()
         try:
-            result = await services.rerank(
-                model_target(rerank_model, services.secret_box),
-                query,
-                [hit.content for hit in ranked],
-                top_n=min(top_k, len(ranked)),
+            target = model_target(rerank_model, services.secret_box)
+            documents = [hit.content for hit in ranked]
+            result = await trace_call(
+                services.trace,
+                target,
+                "rerank",
+                lambda: services.rerank(target, query, documents, top_n=min(top_k, len(ranked))),
+                input_text=query + "\n" + "\n".join(documents),
+                input_context={"query": query, "documents": documents},
+                output_text=lambda result: json.dumps({"items": [{"index": item.index, "score": item.score} for item in result.items], "usage": result.usage}, ensure_ascii=False),
             )
             reranked: list[RetrievalHit] = []
             for item in result.items:
@@ -471,6 +553,8 @@ async def retrieve_across_bases(
                 rerank_applied = True
         except HealthCheckFailure as exc:
             warnings.append(f"Rerank 调用失败，已使用 RRF 结果：{exc}")
+        finally:
+            rerank_ms = round((perf_counter() - rerank_started) * 1000, 3)
     hits = ranked[:top_k]
     insufficient = not hits or (rerank_applied and (hits[0].rerank_score or 0) < 0.05)
     if insufficient:
@@ -482,6 +566,7 @@ async def retrieve_across_bases(
         insufficient=insufficient,
         rerank_applied=rerank_applied,
         warnings=warnings,
+        rerank_ms=rerank_ms,
     )
 
 
@@ -493,17 +578,28 @@ class RetrievalPipeline:
         self.chain = RunnableLambda(self._route_step) | RunnableLambda(self._retrieve_step)
 
     async def _route_step(self, state: dict[str, Any]) -> dict[str, Any]:
+        started = perf_counter()
         selections = await route_knowledge_bases(state["db"], self.services, state["query"])
-        return {**state, "selections": selections}
+        return {
+            **state,
+            "selections": selections,
+            "route_candidates": self.services.last_route_candidates,
+            "route_ms": round((perf_counter() - started) * 1000, 3),
+        }
 
     async def _retrieve_step(self, state: dict[str, Any]) -> RetrievalResult:
-        return await retrieve_across_bases(
+        started = perf_counter()
+        result = await retrieve_across_bases(
             state["db"],
             self.services,
             state["query"],
             state["selections"],
             top_k=state["top_k"],
         )
+        result.route_candidates = state["route_candidates"]
+        result.route_ms = state["route_ms"]
+        result.retrieval_ms = round((perf_counter() - started) * 1000, 3)
+        return result
 
     async def run(self, db: Session, query: str, *, top_k: int = 8) -> RetrievalResult:
         return await self.chain.ainvoke({"db": db, "query": query.strip(), "top_k": top_k})

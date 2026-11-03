@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 import pytest
 from openpyxl import Workbook
 
-from rag_center_console.chunking import chunk_document, detect_numbered_headings, estimate_tokens, recursive_split
+from rag_center_console.chunking import chunk_document, detect_numbered_headings, estimate_tokens, normalize_separators, recursive_split
 from rag_center_console.docmind import DocmindParser, ParseCancelled, layouts_to_elements
 from rag_center_console.parsing import Element, ParsedDocument, ParseError, parse_csv, parse_local, parse_markdown, parse_xlsx
 
@@ -84,6 +84,42 @@ def test_long_paragraph_is_split_within_limit_with_overlap():
     assert unbroken[0].content[-20:] == unbroken[1].content[:20]  # 硬切分保留重叠
 
 
+def test_fixed_recursive_custom_and_semantic_chunking():
+    fixed = chunk_document(ParsedDocument([Element("paragraph", "字" * 250)]), 100, 10, method="fixed")
+    assert all(chunk.token_count <= 100 for chunk in fixed)
+    assert fixed[0].content[-10:] == fixed[1].content[:10]
+
+    custom = chunk_document(
+        ParsedDocument([Element("paragraph", "甲||乙||丙")]),
+        2,
+        0,
+        method="recursive",
+        separators=["||"],
+    )
+    assert [chunk.content for chunk in custom] == ["甲||", "乙||", "丙"]
+    assert normalize_separators(["\n\n", "\n"])[-1] == ""
+    with pytest.raises(ValueError, match="不能为空"):
+        normalize_separators([""])
+
+    calls = []
+
+    def embed(texts):
+        calls.append(texts)
+        return [[1.0, 0.0], [0.99, 0.01], [0.0, 1.0]]
+
+    semantic = chunk_document(
+        ParsedDocument([Element("paragraph", "第一段相同主题。\n\n第二段延续主题。\n\n第三段完全不同。")]),
+        20,
+        0,
+        method="semantic",
+        semantic_threshold=0.75,
+        semantic_embed=embed,
+    )
+    assert len(calls) == 1 and len(calls[0]) == 3
+    assert len(semantic) == 2 and "第一段" in semantic[0].content and "第二段" in semantic[0].content
+    assert semantic[1].content == "第三段完全不同。"
+
+
 def test_table_rows_are_grouped_and_repeat_the_header():
     rows = [[f"item{i}", "x" * 20] for i in range(30)]
     table = Element("table", header=["名称", "备注"], rows=rows, sheet="S1")
@@ -101,6 +137,8 @@ def test_image_elements_become_image_chunks_and_estimate_tokens():
     assert chunk.kind == "image" and chunk.location == {"heading_path": ["图"], "page": 2, "region": [1, 2]}
     assert estimate_tokens("你好world") == 2 + 2
     assert estimate_tokens("你好，世界。") == 6  # 全角标点按 1 Token 计
+    empty = ParsedDocument([Element("paragraph", "前文"), Element("image", ""), Element("paragraph", "后文")])
+    assert [chunk.content for chunk in chunk_document(empty, 800, 0)] == ["前文\n\n后文"]
 
 
 def test_layouts_map_titles_tables_images_and_skip_headers():
@@ -111,11 +149,13 @@ def test_layouts_map_titles_tables_images_and_skip_headers():
         {"type": "table", "markdownContent": "| a | b |\n| - | - |\n| 1 | 2 |", "pageNum": [1]},
         {"type": "table", "text": "无法解析的表", "markdownContent": ""},
         {"type": "figure", "text": "图中文字", "pos": [{"x": 1}], "pageNum": [1]},
+        {"type": "figure", "text": "[empty]", "markdownContent": "![图](https://bucket.oss-cn-hangzhou.aliyuncs.com/a.png?signature=secret)"},
     ]
     elements = layouts_to_elements(layouts)
-    assert [e.kind for e in elements] == ["heading", "paragraph", "table", "paragraph", "image"]
+    assert [e.kind for e in elements] == ["heading", "paragraph", "table", "paragraph", "image", "image"]
     assert (elements[0].level, elements[0].page, elements[2].page) == (2, 1, 2)
     assert elements[4].extra == {"region": [{"x": 1}]}
+    assert elements[5].text == "" and elements[5].extra["source_url"].endswith("signature=secret")
 
 
 class FakeSdk:

@@ -1,5 +1,9 @@
 import hashlib
+import json
+from html.parser import HTMLParser
+from io import BytesIO
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
@@ -8,8 +12,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import tasks
+from .adapters import HealthCheckFailure
+from .app_schemas import KnowledgeSourceRequest
 from .auth import get_current_role, require_knowledge_manager
-from .chunking import estimate_tokens
+from .chunking import estimate_tokens, normalize_separators
 from .config import get_settings
 from .database import get_db
 from .ingestion import KNOWN_ERRORS, PipelineServices, default_services, purge_document, purge_knowledge_base
@@ -145,12 +151,14 @@ def _knowledge_base_reads(db: Session, bases: list[KnowledgeBase]) -> list[Knowl
             tags=kb.tags or [],
             sample_questions=kb.sample_questions or [],
             embedding_model_id=kb.embedding_model_id,
-            embedding_model_name=kb.embedding_model.name,
+            embedding_model_name=kb.embedding_model.model_id,
             vector_dimension=kb.vector_dimension,
             chunk_size=kb.chunk_size,
             chunk_overlap=kb.chunk_overlap,
             chunk_method=kb.chunk_method,
             heading_level=kb.heading_level,
+            separators=kb.separators or [],
+            semantic_threshold=kb.semantic_threshold,
             status=kb.status,
             rebuild_error=kb.rebuild_error,
             document_count=documents.get(kb.id, 0),
@@ -182,6 +190,11 @@ def _document_read(document: Document) -> DocumentRead:
         chunk_size=document.chunk_size,
         chunk_overlap=document.chunk_overlap,
         heading_level=document.heading_level,
+        separators=document.separators or [],
+        semantic_threshold=document.semantic_threshold,
+        metadata=document.metadata_json or {},
+        metadata_status=document.metadata_status,
+        metadata_error=document.metadata_error,
         chunk_count=document.chunk_count,
         job_id=job.id if job else None,
         job_status=job.status if job else None,
@@ -228,6 +241,8 @@ def create_knowledge_base(
         chunk_overlap=payload.chunk_overlap,
         chunk_method=payload.chunk_method,
         heading_level=payload.heading_level,
+        separators=payload.separators,
+        semantic_threshold=payload.semantic_threshold,
     )
     db.add(kb)
     try:
@@ -330,6 +345,18 @@ def list_documents(
     return [_document_read(document) for document in documents]
 
 
+def _parse_separators(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+        if not parsed or not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            raise ValueError
+        return list(normalize_separators(parsed)[:-1])
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="递归分隔符格式无效，最多 20 个、每个不超过 32 字符") from exc
+
+
 @router.post(
     "/knowledge-bases/{knowledge_base_id}/documents",
     response_model=DocumentRead,
@@ -338,13 +365,15 @@ def list_documents(
 def upload_document(
     knowledge_base_id: str,
     file: UploadFile = File(...),
-    parse_strategy: Literal["smart", "fast"] = Form("smart"),
+    parse_strategy: Literal["local", "smart", "fast"] = Form("local"),
     enhance_images: bool = Form(True),
     allow_duplicate: bool = Form(False),
-    chunk_method: Literal["heading", "recursive"] | None = Form(None),
+    chunk_method: Literal["heading", "fixed", "recursive", "semantic"] | None = Form(None),
     chunk_size: int | None = Form(None, ge=100, le=4000),
     chunk_overlap: int | None = Form(None, ge=0, le=1000),
     heading_level: int | None = Form(None, ge=1, le=6),
+    separators: str | None = Form(None),
+    semantic_threshold: float | None = Form(None, gt=0, lt=1),
     _=Depends(require_knowledge_manager),
     db: Session = Depends(get_db),
 ) -> DocumentRead:
@@ -355,6 +384,7 @@ def upload_document(
     overlap = chunk_overlap if chunk_overlap is not None else kb.chunk_overlap
     if overlap >= size:
         raise HTTPException(status_code=422, detail="分段重叠必须小于分段长度")
+    separator_values = _parse_separators(separators)
     settings = get_settings()
     try:
         upload = spool_upload(file.filename, file.content_type, file.file, settings.max_upload_bytes)
@@ -362,7 +392,7 @@ def upload_document(
         code = 413 if "上限" in str(exc) else 422
         raise HTTPException(status_code=code, detail=str(exc)) from exc
     try:
-        if upload.extension in CLOUD_EXTENSIONS and not (
+        if parse_strategy != "local" and upload.extension in CLOUD_EXTENSIONS and not (
             settings.aliyun_docmind_access_key_id and settings.aliyun_docmind_access_key_secret
         ):
             raise HTTPException(
@@ -404,6 +434,8 @@ def upload_document(
         chunk_size=size,
         chunk_overlap=overlap,
         heading_level=heading_level if heading_level is not None else kb.heading_level,
+        separators=separator_values if separator_values is not None else kb.separators,
+        semantic_threshold=semantic_threshold if semantic_threshold is not None else kb.semantic_threshold,
     )
     job = IngestionJob()
     document.jobs.append(job)

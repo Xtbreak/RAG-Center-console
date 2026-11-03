@@ -29,4 +29,5 @@ def reset_database():
 @pytest.fixture
 def client():
     with TestClient(app) as test_client:
+        test_client.get("/api/v1/session")
         yield test_client

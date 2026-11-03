@@ -154,6 +154,27 @@ async def test_route_index_is_built_and_llm_selects_relevant_base():
 
 
 @pytest.mark.asyncio
+async def test_empty_profile_uses_content_fallback_only_with_strong_coverage():
+    vectors = VectorStore(QdrantClient(":memory:"))
+    with SessionLocal() as db:
+        data = seed_retrieval_data(db, vectors)
+        data["finance"].description = ""
+        data["finance"].tags = []
+        data["finance"].sample_questions = []
+        db.commit()
+        services = fake_services(vectors, data["finance"].id)
+
+        async def select_none(_target, _messages, **_kwargs):
+            return GenerationResult(text='{"selected_ids":[],"reasons":{}}', usage=None)
+
+        services.generate = select_none
+        selected = await route_knowledge_bases(db, services, "差旅住宿费怎么报销？")
+        assert [item.knowledge_base_id for item in selected] == [data["finance"].id]
+        assert "回退检索" in selected[0].reason
+        assert await route_knowledge_bases(db, services, "火星办公室怎样报销？") == []
+
+
+@pytest.mark.asyncio
 async def test_langchain_pipeline_runs_hybrid_retrieval_and_rerank():
     vectors = VectorStore(QdrantClient(":memory:"))
     with SessionLocal() as db:
@@ -202,9 +223,11 @@ def test_chat_stream_returns_stages_citations_deltas_and_persists_history(client
     with SessionLocal() as db:
         data = seed_retrieval_data(db, vectors)
 
-    async def stream(_target, _messages):
+    async def stream(_target, _messages, on_usage=None):
         for delta in ("住宿费", "凭发票报销 [1]。"):
             yield delta
+        if on_usage:
+            on_usage({"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20})
 
     services = ChatServices(fake_services(vectors, data["finance"].id), stream=stream)
     app.dependency_overrides[get_chat_services] = lambda: services
@@ -223,6 +246,15 @@ def test_chat_stream_returns_stages_citations_deltas_and_persists_history(client
         assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
         assert detail["messages"][1]["content"] == "住宿费凭发票报销 [1]。"
         assert detail["messages"][1]["citations"][0]["filename"] == "差旅报销办法.pdf"
+        assert client.get("/api/v1/logs").status_code == 403
+        client.put("/api/v1/session", json={"role": "admin"})
+        page = client.get("/api/v1/logs").json()
+        assert page["total"] == 1 and page["items"][0]["status"] == "completed"
+        assert page["items"][0]["total_tokens"] >= 20 and page["items"][0]["estimated"] is False
+        log = client.get(f"/api/v1/logs/{page['items'][0]['id']}").json()
+        assert log["answer"] == "住宿费凭发票报销 [1]。"
+        assert {call["purpose"] for call in log["model_calls"]} == {"routing_embedding", "routing_llm", "knowledge_embedding", "rerank", "answer_llm"}
+        assert log["route_candidates"] and log["retrieval_ms"] >= 0 and log["first_token_ms"] >= 0
     finally:
         app.dependency_overrides.clear()
 
@@ -250,5 +282,62 @@ def test_chat_stream_with_no_selected_base_returns_no_evidence_without_calling_a
         assert "未检索到能够支持回答的知识库依据" in response.text
         assert '"grounded":false' in response.text
         assert "event: done" in response.text
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_failed_chat_is_logged_with_sanitized_error(client):
+    vectors = VectorStore(QdrantClient(":memory:"))
+    with SessionLocal() as db:
+        data = seed_retrieval_data(db, vectors)
+    services = ChatServices(fake_services(vectors, data["finance"].id, invalid_route=True))
+    app.dependency_overrides[get_chat_services] = lambda: services
+    try:
+        client.put("/api/v1/session", json={"role": "user"})
+        response = client.post("/api/v1/chat/stream", json={"question": "触发失败日志"})
+        assert response.status_code == 200 and "event: error" in response.text
+        client.put("/api/v1/session", json={"role": "admin"})
+        page = client.get("/api/v1/logs", params={"status": "failed"}).json()
+        assert page["total"] == 1 and page["items"][0]["error_message"]
+        assert "secret-key" not in response.text and "secret-key" not in str(page)
+        assert client.get("/api/v1/logs/stats").json()["today_count"] == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_agent_chat_uses_bound_base_custom_prompt_and_hides_citations(client):
+    vectors = VectorStore(QdrantClient(":memory:"))
+    with SessionLocal() as db:
+        data = seed_retrieval_data(db, vectors)
+    created = client.post("/api/v1/agents", json={
+        "name": "限定知识助手", "knowledge_base_ids": [data["finance"].id],
+        "prompt": "自定义回答规则标记", "show_citations": False, "published": True,
+    })
+    assert created.status_code == 201, created.text
+    captured = []
+
+    async def stream(_target, messages, on_usage=None):
+        captured.extend(messages)
+        yield "依据回答"
+
+    app.dependency_overrides[get_chat_services] = lambda: ChatServices(fake_services(vectors, data["hr"].id), stream=stream)
+    try:
+        client.put("/api/v1/session", json={"role": "user"})
+        assert [item["name"] for item in client.get("/api/v1/agents").json()] == ["限定知识助手"]
+        response = client.post("/api/v1/chat/stream", json={"question": "差旅怎么报销？", "agent_id": created.json()["id"]})
+        assert response.status_code == 200, response.text
+        assert "正在读取应用绑定的知识库" in response.text
+        assert "财务制度" in response.text and "人事制度" not in response.text
+        assert '"items":[]' in response.text and "差旅报销办法.pdf" not in response.text
+        assert any("自定义回答规则标记" in item["content"] for item in captured if item["role"] == "system")
+        conversations = client.get("/api/v1/conversations").json()
+        detail = client.get(f"/api/v1/conversations/{conversations[0]['id']}").json()
+        assert detail["messages"][1]["citations"] == []
+        assert client.post(f"/api/v1/agents/{created.json()['id']}/publish").status_code == 403
+        client.put("/api/v1/session", json={"role": "admin"})
+        assert client.post(f"/api/v1/agents/{created.json()['id']}/publish").status_code == 200
+        client.put("/api/v1/session", json={"role": "user"})
+        assert client.get("/api/v1/agents").json() == []
+        assert client.post("/api/v1/chat/stream", json={"question": "测试", "agent_id": created.json()["id"]}).status_code == 404
     finally:
         app.dependency_overrides.clear()

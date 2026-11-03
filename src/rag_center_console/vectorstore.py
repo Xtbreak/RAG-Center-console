@@ -38,15 +38,18 @@ class VectorStore:
 
     def ensure_collection(self, name: str, dimension: int) -> None:
         try:
-            if self._client.collection_exists(name):
-                existing = self._client.get_collection(name).config.params.vectors
-                size = existing.size if isinstance(existing, models.VectorParams) else None
-                if size != dimension:
-                    raise VectorStoreError(f"向量库集合维度为 {size}，与配置的 {dimension} 不一致，请重建知识库")
-                return
-            self._client.create_collection(
-                name, vectors_config=models.VectorParams(size=dimension, distance=models.Distance.COSINE)
-            )
+            if not self._client.collection_exists(name):
+                try:
+                    self._client.create_collection(
+                        name, vectors_config=models.VectorParams(size=dimension, distance=models.Distance.COSINE)
+                    )
+                except Exception:
+                    if not self._client.collection_exists(name):
+                        raise
+            existing = self._client.get_collection(name).config.params.vectors
+            size = existing.size if isinstance(existing, models.VectorParams) else None
+            if size != dimension:
+                raise VectorStoreError(f"向量库集合维度为 {size}，与配置的 {dimension} 不一致，请重建知识库")
             for field in ("document_id", "chunk_id"):
                 self._client.create_payload_index(name, field, models.PayloadSchemaType.KEYWORD)
         except VectorStoreError:

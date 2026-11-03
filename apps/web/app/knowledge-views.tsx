@@ -33,6 +33,7 @@ import {
   listChunks,
   listDocuments,
   listModels,
+  importKnowledgeSource,
   retryDocument,
   testRetrieval,
   updateChunk,
@@ -47,6 +48,7 @@ import {
   LOCAL_PARSE_EXTENSIONS,
   MAX_UPLOAD_BYTES,
   chunkMethodCopy,
+  DEFAULT_CHUNK_SEPARATORS,
   type ChunkMethod,
   type KnowledgeBase,
   type KnowledgeChunk,
@@ -91,6 +93,7 @@ const stageLabels: Record<string, string> = {
   uploaded: "排队中",
   parsing: "解析中",
   enhancing: "图片增强",
+  metadata: "元数据",
   chunking: "切分中",
   embedding: "向量化",
 };
@@ -134,19 +137,30 @@ function useEmbeddingModels(enabled: boolean) {
   return { models, loading, error };
 }
 
-type ChunkForm = { chunkMethod: ChunkMethod; chunkSize: string; chunkOverlap: string; headingLevel: string };
+type ChunkForm = { chunkMethod: ChunkMethod; chunkSize: string; chunkOverlap: string; headingLevel: string; separators: string[]; semanticThreshold: string };
+
+const SEPARATOR_GROUPS = [
+  { label: "段落（\\n\\n）", values: ["\n\n"] },
+  { label: "换行（\\n）", values: ["\n"] },
+  { label: "句末标点", values: ["。", "！", "？", "!", "?"] },
+  { label: "句内标点", values: ["；", ";", ". ", "，", ",", "、"] },
+  { label: "空格", values: [" "] },
+];
+const PRESET_SEPARATORS = new Set(SEPARATOR_GROUPS.flatMap((group) => group.values));
 
 function chunkFormFrom(settings: ChunkSettings): ChunkForm {
-  return { chunkMethod: settings.chunkMethod, chunkSize: String(settings.chunkSize), chunkOverlap: String(settings.chunkOverlap), headingLevel: String(settings.headingLevel) };
+  return { chunkMethod: settings.chunkMethod, chunkSize: String(settings.chunkSize), chunkOverlap: String(settings.chunkOverlap), headingLevel: String(settings.headingLevel), separators: settings.separators?.length ? settings.separators : DEFAULT_CHUNK_SEPARATORS, semanticThreshold: String(settings.semanticThreshold ?? 0.75) };
 }
 
-const DEFAULT_CHUNK_FORM = chunkFormFrom({ chunkMethod: "heading", chunkSize: 800, chunkOverlap: 120, headingLevel: 6 });
+const DEFAULT_CHUNK_FORM = chunkFormFrom({ chunkMethod: "heading", chunkSize: 800, chunkOverlap: 120, headingLevel: 6, separators: DEFAULT_CHUNK_SEPARATORS, semanticThreshold: 0.75 });
 
 function parseChunkForm(form: ChunkForm): { settings: ChunkSettings; error: string | null } {
-  const settings = { chunkMethod: form.chunkMethod, chunkSize: Number(form.chunkSize), chunkOverlap: Number(form.chunkOverlap), headingLevel: Number(form.headingLevel) };
+  const settings = { chunkMethod: form.chunkMethod, chunkSize: Number(form.chunkSize), chunkOverlap: Number(form.chunkOverlap), headingLevel: Number(form.headingLevel), separators: form.separators, semanticThreshold: Number(form.semanticThreshold) };
   const error = !Number.isInteger(settings.chunkSize) || settings.chunkSize < 100 || settings.chunkSize > 4000 ? "分段大小需为 100–4000 的整数"
     : !Number.isInteger(settings.chunkOverlap) || settings.chunkOverlap < 0 || settings.chunkOverlap > 1000 ? "分段重叠需为 0–1000 的整数"
-    : settings.chunkOverlap >= settings.chunkSize ? "分段重叠必须小于分段大小" : null;
+    : settings.chunkOverlap >= settings.chunkSize ? "分段重叠必须小于分段大小"
+    : settings.chunkMethod === "recursive" && (!settings.separators.length || settings.separators.length > 20 || settings.separators.some((item) => !item.length || item.length > 32)) ? "请配置 1–20 个分隔符，每个不超过 32 字符"
+    : settings.chunkMethod === "semantic" && (!(settings.semanticThreshold > 0) || settings.semanticThreshold >= 1) ? "语义相似度阈值必须在 0 和 1 之间" : null;
   return { settings, error };
 }
 
@@ -170,13 +184,26 @@ function sameStrings(left: string[], right: string[]) {
   return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
+function escapeSeparator(value: string) {
+  return value.replaceAll("\\", "\\\\").replaceAll("\r", "\\r").replaceAll("\n", "\\n").replaceAll("\t", "\\t");
+}
+
+function customSeparatorText(separators: string[]) {
+  return separators.filter((item) => !PRESET_SEPARATORS.has(item)).map(escapeSeparator).join("\n");
+}
+
+function parseCustomSeparators(value: string) {
+  return value.split("\n").filter((item) => item.length > 0).map((item) => item.replaceAll("\\\\", "\\").replaceAll("\\n", "\n").replaceAll("\\r", "\r").replaceAll("\\t", "\t"));
+}
+
 export function describeChunkSettings(settings: ChunkSettings) {
-  const level = settings.chunkMethod === "heading" ? (settings.headingLevel >= 6 ? "（全部标题）" : `（至 H${settings.headingLevel}）`) : "";
+  const level = settings.chunkMethod === "heading" ? (settings.headingLevel >= 6 ? "（全部标题）" : `（至 H${settings.headingLevel}）`) : settings.chunkMethod === "semantic" ? `（阈值 ${settings.semanticThreshold}）` : settings.chunkMethod === "recursive" ? `（${settings.separators.length} 个分隔符）` : "";
   return `${chunkMethodCopy[settings.chunkMethod].name}${level} · ${settings.chunkSize} Token / 重叠 ${settings.chunkOverlap}`;
 }
 
 function ChunkSettingsFields({ id, value, onChange, disabled }: { id: string; value: ChunkForm; onChange: (value: ChunkForm) => void; disabled?: boolean }) {
-  const icons: Record<ChunkMethod, typeof ListTree> = { heading: ListTree, recursive: WrapText };
+  const icons: Record<ChunkMethod, typeof ListTree> = { heading: ListTree, fixed: Zap, recursive: WrapText, semantic: Sparkles };
+  const custom = value.separators.filter((item) => !PRESET_SEPARATORS.has(item));
   return (
     <fieldset className="chunk-settings" disabled={disabled}>
       <legend>切分方式</legend>
@@ -188,9 +215,14 @@ function ChunkSettingsFields({ id, value, onChange, disabled }: { id: string; va
       </div>
       <div className="chunk-params">
         {value.chunkMethod === "heading" ? <label><span>切分到标题层级</span><select value={value.headingLevel} onChange={(event) => onChange({ ...value, headingLevel: event.target.value })}>{[1, 2, 3, 4, 5, 6].map((level) => <option key={level} value={level}>{level === 6 ? "全部标题（H1–H6）" : `第 ${level} 级（H1–H${level}）`}</option>)}</select><small className="field-hint">更深的标题并入所属章节</small></label> : null}
+        {value.chunkMethod === "semantic" ? <label><span>语义相似度阈值</span><input type="number" min={0.05} max={0.95} step={0.05} value={value.semanticThreshold} onChange={(event) => onChange({ ...value, semanticThreshold: event.target.value })} /><small className="field-hint">阈值越高，越容易在语义变化处拆分</small></label> : null}
         <label><span>分段大小（Token）</span><input type="number" min={100} max={4000} value={value.chunkSize} onChange={(event) => onChange({ ...value, chunkSize: event.target.value })} /></label>
         <label><span>分段重叠（Token）</span><input type="number" min={0} max={1000} value={value.chunkOverlap} onChange={(event) => onChange({ ...value, chunkOverlap: event.target.value })} /></label>
       </div>
+      {value.chunkMethod === "recursive" ? <div className="separator-settings"><span>分隔符优先级</span><div className="separator-presets">{SEPARATOR_GROUPS.map((group) => {
+        const checked = group.values.every((item) => value.separators.includes(item));
+        return <label key={group.label}><input type="checkbox" checked={checked} onChange={() => onChange({ ...value, separators: checked ? [...SEPARATOR_GROUPS.flatMap((item) => item.values).filter((item) => value.separators.includes(item) && !group.values.includes(item)), ...custom] : [...SEPARATOR_GROUPS.flatMap((item) => item.values).filter((item) => value.separators.includes(item) || group.values.includes(item)), ...custom] })} /><span>{group.label}</span></label>;
+      })}</div><label><span>自定义分隔符（每行一个，支持 \\n、\\r、\\t）</span><textarea value={customSeparatorText(value.separators)} onChange={(event) => onChange({ ...value, separators: [...SEPARATOR_GROUPS.flatMap((item) => item.values).filter((item) => value.separators.includes(item)), ...parseCustomSeparators(event.target.value)] })} placeholder={'例如：\\n---\\n'} /></label><small className="field-hint">按上方顺序递归尝试；始终保留按字符硬切分兜底。</small></div> : null}
     </fieldset>
   );
 }
@@ -258,13 +290,13 @@ export function KnowledgeView({ selectedId, router, role, knowledgeBases, loaded
       {loadError ? <InlineAlert title="知识库加载失败" action={<Button icon={RefreshCw} onClick={() => void refreshKnowledgeBases()}>重试</Button>}>{loadError}</InlineAlert> : null}
       {!loaded && !loadError ? <div className="loading-panel" role="status">正在加载知识库…</div> : null}
       {loaded && filtered.length ? <div className="kb-list">
-        {filtered.map((item) => <KnowledgeRow key={item.id} kb={item} onOpen={() => router.push(`/knowledge?kb=${item.id}`)} />)}
+        {filtered.map((item) => <KnowledgeRow key={item.id} kb={item} onOpen={() => router.push(`/knowledge/${item.id}`)} />)}
       </div> : null}
       {loaded && !filtered.length ? <EmptyState icon={keyword ? Search : Database} title={keyword ? "没有匹配的知识库" : "还没有知识库"} description={keyword ? "请调整搜索关键词。" : "创建知识库后即可导入企业文档。"} action={keyword ? undefined : <Button variant="primary" icon={Plus} onClick={() => setCreateOpen(true)}>新建知识库</Button>} /> : null}
       <CreateKnowledgeModal open={createOpen} role={role} onOpenChange={setCreateOpen} onCreated={async (created) => {
         setToast(`知识库“${created.name}”已创建`);
         await refreshKnowledgeBases();
-        router.push(`/knowledge?kb=${created.id}`);
+        router.push(`/knowledge/${created.id}`);
       }} />
     </div>
   );
@@ -278,7 +310,7 @@ function KnowledgeRow({ kb, onOpen }: { kb: KnowledgeBase; onOpen: () => void })
       <span className="kb-main"><span className="title-line"><strong>{kb.name}</strong><StatusBadge status={status.tone}>{status.label}</StatusBadge></span><small>{kb.description || "未填写说明"}</small></span>
       <span className="kb-stat"><small>文档</small><strong>{kb.documentCount}</strong></span>
       <span className="kb-stat"><small>分段</small><strong>{kb.chunkCount.toLocaleString()}</strong></span>
-      <span className="kb-model"><small>Embedding</small><strong>{kb.embeddingModelName}</strong></span>
+      <span className="kb-model"><small>Embedding</small><strong title={kb.embeddingModelName}>{kb.embeddingModelName}</strong></span>
       <span className="kb-updated"><small>{formatTime(kb.updatedAt)}</small><ChevronRight size={18} aria-hidden="true" /></span>
     </button>
   );
@@ -358,6 +390,33 @@ function KnowledgeDetail({ kb, router, refreshKnowledgeBases, setToast }: { kb: 
   );
 }
 
+const metadataStatusViews = {
+  pending: { label: "未构建", tone: "neutral" },
+  extracting: { label: "构建中", tone: "progress" },
+  ready: { label: "已构建", tone: "success" },
+  failed: { label: "构建失败", tone: "error" },
+  skipped: { label: "已跳过", tone: "neutral" },
+};
+
+function DocumentMetadataModal({ document, onClose }: { document: KnowledgeDocument | null; onClose: () => void }) {
+  if (!document) return null;
+  const fields = [
+    { key: "dates", label: "时间" },
+    { key: "versions", label: "版本" },
+    { key: "subjects", label: "主体信息" },
+    { key: "owners", label: "负责人" },
+    { key: "keywords", label: "检索关键词" },
+    { key: "questions", label: "可能被问到的问题" },
+  ] as const;
+  const status = metadataStatusViews[document.metadataStatus];
+  const hasMetadata = fields.some((field) => document.metadata[field.key]?.length);
+  return <Modal open onOpenChange={onClose} title={`元数据 · ${document.filename}`} description="自动从正文抽取，并作为独立分段参与混合检索。" width="wide">
+    <div className="metadata-status"><StatusBadge status={status.tone}>{status.label}</StatusBadge><span>{document.metadataStatus === "ready" ? "已生成 metadata 索引分段" : "正文索引进度不受影响"}</span></div>
+    {document.metadataError ? <InlineAlert title="元数据构建异常">{document.metadataError}；可重新处理文档重试。</InlineAlert> : null}
+    {hasMetadata ? <div className="metadata-grid">{fields.map((field) => <section key={field.key}><h3>{field.label}</h3>{document.metadata[field.key]?.length ? <div className="metadata-values">{document.metadata[field.key].map((value) => <span key={value}>{value}</span>)}</div> : <p>正文未明确提供</p>}</section>)}</div> : <EmptyState compact icon={ListTree} title={document.metadataStatus === "failed" ? "本次构建失败" : "暂无可展示的元数据"} description="未确认的信息保持为空，不会由模型推测补写。" />}
+  </Modal>;
+}
+
 function DocumentsPanel({ documents, loaded, error, reload, disabled, onImport, onChanged, setToast }: {
   documents: KnowledgeDocument[];
   loaded: boolean;
@@ -371,6 +430,7 @@ function DocumentsPanel({ documents, loaded, error, reload, disabled, onImport, 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<KnowledgeDocument | null>(null);
+  const [metadataDocument, setMetadataDocument] = useState<KnowledgeDocument | null>(null);
 
   const run = async (document: KnowledgeDocument, action: () => Promise<unknown>, success: string) => {
     setBusyId(document.id);
@@ -409,6 +469,7 @@ function DocumentsPanel({ documents, loaded, error, reload, disabled, onImport, 
               <span className="document-status"><StatusBadge status={status.tone}>{status.label}{processing && document.jobProgress ? ` ${document.jobProgress}%` : ""}</StatusBadge>{processing ? <span className="progress-track" aria-hidden="true"><span className="progress-bar" style={{ width: `${Math.max(document.jobProgress, 4)}%` }} /></span> : null}</span>
               <span>{formatTime(document.updatedAt)}</span>
               <span className="row-actions">
+                <button className="icon-button" aria-label={`查看元数据：${document.filename}`} title={`元数据：${metadataStatusViews[document.metadataStatus].label}`} onClick={() => setMetadataDocument(document)}><ListTree size={16} /></button>
                 {processing ? <button className="icon-button" aria-label={`取消处理：${document.filename}`} title="取消处理" disabled={busy || document.cancelRequested} onClick={() => void run(document, () => cancelDocument(document.id), "已请求取消处理")}><X size={16} /></button> : null}
                 {!processing && document.status !== "ready" ? <button className="icon-button" aria-label={`重新处理：${document.filename}`} title="重新处理" disabled={busy || disabled} onClick={() => void run(document, () => retryDocument(document.id), "已重新提交处理任务")}><RefreshCw size={16} /></button> : null}
                 {!processing ? <button className="icon-button" aria-label={`删除：${document.filename}`} title="删除" disabled={busy || disabled} onClick={() => setPendingDelete(document)}><Trash2 size={16} /></button> : null}
@@ -418,6 +479,7 @@ function DocumentsPanel({ documents, loaded, error, reload, disabled, onImport, 
         })}
       </div> : null}
       {loaded && !documents.length && !error ? <EmptyState compact icon={FileText} title="还没有文档" description="导入文件后，解析状态和分段数量会显示在这里。" action={<Button icon={UploadCloud} onClick={onImport} disabled={disabled}>导入第一个文件</Button>} /> : null}
+      <DocumentMetadataModal document={metadataDocument} onClose={() => setMetadataDocument(null)} />
       <ConfirmDialog
         open={Boolean(pendingDelete)}
         title="删除文档"
@@ -567,12 +629,16 @@ function RetrievalPanel({ hasDocuments }: { hasDocuments: boolean }) {
   return (
     <div className="retrieval-layout">
       <section className="panel retrieval-query">
-        <h2>测试自动选库与混合检索</h2><p>按正式问答链路执行候选库召回、每库向量查询、BM25、RRF 和可选 Rerank。</p>
-        <label htmlFor="retrieval-query">测试问题</label><textarea id="retrieval-query" value={query} maxLength={2000} onChange={(event) => setQuery(event.target.value)} placeholder="输入用于验证检索效果的问题" />
-        <label><span>返回分段</span><select value={topK} onChange={(event) => setTopK(Number(event.target.value))}><option value={5}>5</option><option value={8}>8</option><option value={12}>12</option><option value={20}>20</option></select></label>
-        <Button variant="primary" icon={Zap} onClick={() => void run()} disabled={!hasDocuments || !query.trim() || running}>{running ? "检索中…" : "开始检索"}</Button>
-        <p className="form-hint">{hasDocuments ? "该测试使用全库自动路由，结果不限定在当前知识库。" : "当前还没有可检索文档。"}</p>
-        {error ? <InlineAlert title="检索测试失败">{error}</InlineAlert> : null}
+        <div className="retrieval-query-heading"><h2>测试自动选库与混合检索</h2><p>按正式问答链路执行候选库召回、每库向量查询、BM25、RRF 和可选 Rerank。</p></div>
+        <div className="retrieval-fields">
+          <label htmlFor="retrieval-query">测试问题<textarea id="retrieval-query" value={query} maxLength={2000} onChange={(event) => setQuery(event.target.value)} placeholder="输入用于验证检索效果的问题" aria-describedby="retrieval-query-hint" /></label>
+          <div className="retrieval-form-row">
+            <label><span>返回分段</span><select value={topK} onChange={(event) => setTopK(Number(event.target.value))}><option value={5}>5</option><option value={8}>8</option><option value={12}>12</option><option value={20}>20</option></select></label>
+            <Button variant="primary" icon={Zap} onClick={() => void run()} disabled={!hasDocuments || !query.trim() || running}>{running ? "检索中…" : "开始检索"}</Button>
+          </div>
+          <p className="form-hint" id="retrieval-query-hint">{hasDocuments ? "该测试使用全库自动路由，结果不限定在当前知识库。" : "当前还没有可检索文档。"}</p>
+          {error ? <InlineAlert title="检索测试失败">{error}</InlineAlert> : null}
+        </div>
       </section>
       <section className="panel retrieval-results">
         <div className="panel-heading compact"><div><h2>召回结果</h2><p>{result ? `命中 ${result.hits.length} 个分段${result.rerankApplied ? "，已执行重排" : ""}` : "检索完成后显示融合和重排结果"}</p></div></div>
@@ -618,6 +684,8 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
   if (chunk.chunkOverlap !== kb.chunkOverlap) changes.chunkOverlap = chunk.chunkOverlap;
   if (chunk.chunkMethod !== kb.chunkMethod) changes.chunkMethod = chunk.chunkMethod;
   if (chunk.headingLevel !== kb.headingLevel) changes.headingLevel = chunk.headingLevel;
+  if (!sameStrings(chunk.separators, kb.separators)) changes.separators = chunk.separators;
+  if (chunk.semanticThreshold !== kb.semanticThreshold) changes.semanticThreshold = chunk.semanticThreshold;
   const dirty = Object.keys(changes).length > 0;
   const modelChanged = Boolean(changes.embeddingModelId);
   const currentModelMissing = !models.some((model) => model.id === kb.embeddingModelId);
@@ -660,9 +728,10 @@ function SettingsPanel({ kb, setToast, onSaved, onDeleted }: { kb: KnowledgeBase
           <label><span>Embedding 模型</span>
             <select value={form.embeddingModelId} onChange={(event) => setForm({ ...form, embeddingModelId: event.target.value })} disabled={rebuilding || loading}>
               {currentModelMissing ? <option value={kb.embeddingModelId}>{kb.embeddingModelName}（当前）</option> : null}
-              {models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.vectorDimension} 维</option>)}
+              {models.map((model) => <option key={model.id} value={model.id}>{model.modelId} · {model.vectorDimension} 维</option>)}
             </select>
             {modelsError ? <small>{modelsError}</small> : null}
+            <small className="field-hint">显示真实模型 ID；新加入的模型会出现在列表中，切换后需要重建向量索引。</small>
           </label>
           <label className="wide-field"><span>知识库说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" disabled={rebuilding} /></label>
           <label className="wide-field"><span>路由标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="使用逗号分隔，最多 20 个" disabled={rebuilding} /><small className="field-hint">用于自动选库的关键词，单个标签最多 50 个字符。</small></label>
@@ -687,6 +756,7 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
   const { models, loading, error: modelsError } = useEmbeddingModels(open);
   const [form, setForm] = useState({ name: "", description: "", tags: "", sampleQuestions: "", embeddingModelId: "" });
   const [chunkForm, setChunkForm] = useState<ChunkForm>(DEFAULT_CHUNK_FORM);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const embeddingModelId = form.embeddingModelId || models[0]?.id || "";
@@ -698,7 +768,7 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
   const close = (next: boolean) => {
     if (submitting) return;
     onOpenChange(next);
-    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", tags: "", sampleQuestions: "", embeddingModelId: "" }); setChunkForm(DEFAULT_CHUNK_FORM); setError(null); }, 150);
+    if (!next) window.setTimeout(() => { setForm({ name: "", description: "", tags: "", sampleQuestions: "", embeddingModelId: "" }); setChunkForm(DEFAULT_CHUNK_FORM); setShowAdvanced(false); setError(null); }, 150);
   };
 
   const submit = async () => {
@@ -718,20 +788,25 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
   return (
     <Modal open={open} onOpenChange={close} title="新建知识库" description="每个知识库使用独立的 Embedding 模型和向量集合。" width="wide">
       <div className="modal-form">
-        <label><span>名称</span><input autoFocus value={form.name} maxLength={120} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="输入知识库名称" /></label>
-        <label><span>说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，阶段 4 将用于自动选库" /></label>
-        <label><span>路由标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="使用逗号分隔，最多 20 个" /><small className="field-hint">用于自动选库的关键词。</small></label>
-        <label><span>示例问题</span><textarea value={form.sampleQuestions} onChange={(event) => setForm({ ...form, sampleQuestions: event.target.value })} placeholder="每行填写一个问题，最多 20 个" /><small className="field-hint">帮助系统识别这个知识库适合回答的问题。</small></label>
-        <label><span>Embedding 模型</span>
+        <label><span>名称（必填）</span><input autoFocus value={form.name} maxLength={120} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="输入知识库名称" /></label>
+        <label><span>Embedding 模型（必选）</span>
           <select value={embeddingModelId} onChange={(event) => setForm({ ...form, embeddingModelId: event.target.value })} disabled={loading || !models.length}>
             {loading ? <option value="">正在加载…</option> : null}
             {!loading && !models.length ? <option value="">尚无可用模型</option> : null}
-            {models.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.vectorDimension} 维</option>)}
+            {models.map((model) => <option key={model.id} value={model.id}>{model.modelId} · {model.vectorDimension} 维</option>)}
           </select>
           {modelsError ? <small className="field-error">{modelsError}</small> : null}
           {!loading && !models.length && !modelsError ? <small>{role === "admin" ? "请先在“模型服务”中添加启用的 Embedding 模型并填写向量维度。" : "请联系管理员在“模型服务”中添加 Embedding 模型。"}</small> : null}
+          <small className="field-hint">新增模型会自动出现在列表中；创建后也可切换，切换时需要重建向量索引。</small>
         </label>
-        <ChunkSettingsFields id="kb-create" value={chunkForm} onChange={setChunkForm} />
+        <button type="button" className="text-action advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((current) => !current)}>{showAdvanced ? "收起" : "展开"}高级设置（可选）<ChevronRight className={showAdvanced ? "is-expanded" : ""} size={15} /></button>
+        {showAdvanced ? <div className="advanced-settings-content">
+          <p className="form-hint">默认按标题切分，不产生语义切分的额外 Embedding 调用；以下项目均可稍后修改。</p>
+          <label><span>说明</span><textarea value={form.description} maxLength={2000} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明知识范围，用于自动选库" /></label>
+          <label><span>路由标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="使用逗号分隔，最多 20 个" /><small className="field-hint">用于自动选库的关键词。</small></label>
+          <label><span>示例问题</span><textarea value={form.sampleQuestions} onChange={(event) => setForm({ ...form, sampleQuestions: event.target.value })} placeholder="每行填写一个问题，最多 20 个" /><small className="field-hint">帮助系统识别这个知识库适合回答的问题。</small></label>
+          <ChunkSettingsFields id="kb-create" value={chunkForm} onChange={setChunkForm} />
+        </div> : null}
         {validation ? <InlineAlert tone="warning">{validation}</InlineAlert> : null}
         {error ? <InlineAlert>{error}</InlineAlert> : null}
       </div>
@@ -740,11 +815,51 @@ function CreateKnowledgeModal({ open, role, onOpenChange, onCreated }: { open: b
   );
 }
 
+type KnowledgeSourceTab = "file" | "text" | "qa" | "web" | "feishu" | "api";
+function SourceImportPanel({ kb, onImported, disabled, source, setSource }: { kb: KnowledgeBase; onImported: (document: KnowledgeDocument) => Promise<void>; disabled: boolean; source: KnowledgeSourceTab; setSource: (source: KnowledgeSourceTab) => void }) {
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [url, setUrl] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [pairs, setPairs] = useState<Array<{ question: string; answer: string }>>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const document = await importKnowledgeSource(kb.id, source === "web" ? { source, title, url } : source === "qa" ? { source, title, qa_pairs: pairs } : { source: "text", title, content });
+      await onImported(document);
+    } catch (reason) { setError(errorMessage(reason, "数据源导入失败")); }
+    finally { setBusy(false); }
+  };
+  return <div className="source-import">
+    <div className="source-tabs" aria-label="知识数据源">{(["file", "text", "qa", "web", "feishu", "api"] as const).map((item) => <button type="button" key={item} className={source === item ? "source-active" : ""} onClick={() => { setSource(item); setError(null); }}>{{ file: "本地文件", text: "自定义文本", qa: "问答对", web: "网页链接", feishu: "飞书", api: "API" }[item]}</button>)}</div>
+    {source !== "file" && source !== "feishu" && source !== "api" ? <div className="source-form">
+      <label><span>资料名称{source === "web" ? "（可选）" : ""}</span><input value={title} maxLength={200} onChange={(event) => setTitle(event.target.value)} placeholder={source === "web" ? "默认使用网页域名" : "导入资料的名称"} /></label>
+      {source === "text" ? <label><span>正文</span><textarea className="source-textarea" value={content} maxLength={1000000} onChange={(event) => setContent(event.target.value)} placeholder="粘贴需要解析、切分和检索的文本" /></label> : null}
+      {source === "web" ? <><label><span>公开网页地址</span><input type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/article" /></label><p className="form-hint">服务端抓取单个公开网页并提取正文，保留来源地址；不支持需要登录或私有网络链接。</p></> : null}
+      {source === "qa" ? <><div className="qa-input-grid"><label><span>问题</span><textarea value={question} onChange={(event) => setQuestion(event.target.value)} /></label><label><span>答案</span><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} /></label></div><Button icon={Plus} disabled={!question.trim() || !answer.trim()} onClick={() => { setPairs((current) => [...current, { question: question.trim(), answer: answer.trim() }]); setQuestion(""); setAnswer(""); }}>添加问答对</Button>{pairs.length ? <div className="qa-pair-list">{pairs.map((pair, index) => <div key={`${pair.question}-${index}`}><span><strong>{pair.question}</strong><small>{pair.answer}</small></span><button className="icon-button" aria-label={`删除问答对 ${index + 1}`} onClick={() => setPairs((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={15} /></button></div>)}</div> : null}<p className="form-hint">CSV/XLSX 问答表也可通过“本地文件”上传；此处适合直接录入。</p></> : null}
+      {error ? <InlineAlert>{error}</InlineAlert> : null}
+      <Button variant="primary" disabled={disabled || busy || (source === "text" ? !content.trim() : source === "web" ? !url.trim() : !pairs.length)} onClick={() => void submit()}>{busy ? "正在抓取并创建任务…" : `导入到 ${kb.name}`}</Button>
+    </div> : null}
+    {source === "feishu" ? <EmptyState compact icon={BookOpen} title="飞书连接器尚未配置" description="当前版本未保存飞书应用凭据，也不能执行同步。完成企业飞书应用配置后再启用此入口。" action={<Button disabled>手动同步（未接入）</Button>} /> : null}
+    {source === "api" ? <div className="api-import-doc"><p>使用现有文档上传接口，文件会进入与页面相同的处理队列：</p><pre>{`curl -X POST '/api/v1/knowledge-bases/${kb.id}/documents' \\
+  -H 'Cookie: rag_session=<你的匿名会话 ID>' \\
+  -F 'file=@./手册.md' \\
+  -F 'parse_strategy=local' \\
+  -F 'chunk_method=${kb.chunkMethod}'`}</pre><Button onClick={() => void navigator.clipboard.writeText(`/api/v1/knowledge-bases/${kb.id}/documents`)}>复制接口路径</Button></div> : null}
+  </div>;
+}
+
 function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; kb: KnowledgeBase; onOpenChange: (open: boolean) => void; onImported: (document: KnowledgeDocument) => Promise<void> }) {
   const [step, setStep] = useState(1);
-  const [file, setFile] = useState<File | null>(null);
+  const [sourceTab, setSourceTab] = useState<KnowledgeSourceTab>("file");
+  const [files, setFiles] = useState<File[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [parseStrategy, setParseStrategy] = useState<"smart" | "fast">("smart");
+  const [dragging, setDragging] = useState(false);
+  const [parseStrategy, setParseStrategy] = useState<"local" | "smart" | "fast">("local");
   const [enhanceImages, setEnhanceImages] = useState(true);
   const [chunkForm, setChunkForm] = useState<ChunkForm>(chunkFormFrom(kb));
   const { settings: chunk, error: chunkError } = parseChunkForm(chunkForm);
@@ -752,82 +867,124 @@ function ImportWizard({ open, kb, onOpenChange, onImported }: { open: boolean; k
   const [progress, setProgress] = useState(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<string | null>(null);
-  const extension = file ? extensionOf(file.name) : "";
-  const local = LOCAL_PARSE_EXTENSIONS.includes(extension);
-  const image = IMAGE_EXTENSIONS.includes(extension);
+  const localCount = files.filter((file) => {
+    const extension = extensionOf(file.name);
+    return LOCAL_PARSE_EXTENSIONS.includes(extension) || (parseStrategy === "local" && ["pdf", "doc", "docx"].includes(extension));
+  }).length;
+  const cloudCount = files.length - localCount;
+  const cloudOptionalCount = files.filter((file) => !LOCAL_PARSE_EXTENSIONS.includes(extensionOf(file.name))).length;
+  const hasImages = files.some((file) => IMAGE_EXTENSIONS.includes(extensionOf(file.name)));
+  const totalSize = files.reduce((total, file) => total + file.size, 0);
 
-  const reset = () => { setStep(1); setFile(null); setFileError(null); setParseStrategy("smart"); setEnhanceImages(true); setChunkForm(chunkFormFrom(kb)); setProgress(0); setSubmitError(null); setDuplicate(null); };
+  const reset = () => { setStep(1); setFiles([]); setFileError(null); setDragging(false); setParseStrategy("local"); setEnhanceImages(true); setChunkForm(chunkFormFrom(kb)); setProgress(0); setSubmitError(null); setDuplicate(null); };
   const close = (next: boolean) => {
     if (uploading) return;
     onOpenChange(next);
     if (!next) window.setTimeout(reset, 150);
   };
 
-  const choose = (selected: File | null) => {
+  const choose = (selected: File[]) => {
     setSubmitError(null);
     setDuplicate(null);
-    if (!selected) { setFile(null); setFileError(null); return; }
-    const selectedExtension = extensionOf(selected.name);
-    if (!ACCEPTED_EXTENSIONS.includes(selectedExtension)) setFileError(`不支持 .${selectedExtension || "无扩展名"} 文件`);
-    else if (selected.size === 0) setFileError("文件内容为空");
-    else if (selected.size > MAX_UPLOAD_BYTES) setFileError(`文件为 ${formatBytes(selected.size)}，超过 100 MB 上限`);
-    else setFileError(null);
-    setFile(selected);
+    const errors: string[] = [];
+    const valid = selected.filter((file) => {
+      const extension = extensionOf(file.name);
+      if (!ACCEPTED_EXTENSIONS.includes(extension)) { errors.push(`${file.name}：不支持 .${extension || "无扩展名"}`); return false; }
+      if (file.size === 0) { errors.push(`${file.name}：文件内容为空`); return false; }
+      if (file.size > MAX_UPLOAD_BYTES) { errors.push(`${file.name}：超过 100 MB 上限`); return false; }
+      return true;
+    });
+    setFiles((current) => {
+      const existing = new Set(current.map((file) => `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`));
+      const additions = valid.filter((file) => {
+        const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
+        if (existing.has(key)) return false;
+        existing.add(key);
+        return true;
+      });
+      return [...current, ...additions];
+    });
+    setFileError(errors.length ? errors.join("；") : null);
   };
 
   const submit = async (allowDuplicate: boolean) => {
-    if (!file) return;
+    if (!files.length) return;
     setUploading(true);
     setProgress(0);
     setSubmitError(null);
     setDuplicate(null);
-    try {
-      const document = await uploadDocument(kb.id, file, { parseStrategy, enhanceImages, allowDuplicate, ...chunk }, setProgress);
-      setUploading(false);
-      close(false);
-      await onImported(document);
-    } catch (reason) {
-      setUploading(false);
-      if (reason instanceof ApiError && reason.status === 409 && typeof reason.detail === "object") setDuplicate(reason.message);
-      else setSubmitError(errorMessage(reason, "上传失败"));
+    const remaining: File[] = [];
+    const errors: string[] = [];
+    let duplicateFound = false;
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      let document: KnowledgeDocument | null = null;
+      try {
+        document = await uploadDocument(kb.id, file, { parseStrategy, enhanceImages, allowDuplicate, ...chunk }, (fraction) => setProgress((index + fraction) / files.length));
+      } catch (reason) {
+        remaining.push(file);
+        if (reason instanceof ApiError && reason.status === 409 && typeof reason.detail === "object") duplicateFound = true;
+        else errors.push(`${file.name}：${errorMessage(reason, "上传失败")}`);
+      }
+      if (document) {
+        try {
+          await onImported(document);
+        } catch (reason) {
+          errors.push(`${file.name} 已导入，但列表刷新失败：${errorMessage(reason, "请手动刷新")}`);
+        }
+      }
+      setProgress((index + 1) / files.length);
     }
+    setUploading(false);
+    setFiles(remaining);
+    if (duplicateFound) setDuplicate("部分文件与知识库已有内容重复。已成功的文件不会重复导入，可仅重试剩余文件。");
+    if (errors.length) setSubmitError(errors.join("；"));
+    if (!remaining.length) close(false);
   };
 
-  const parseLabel = local ? "本地结构化解析" : parseStrategy === "smart" ? "智能解析（大模型增强）" : "快速解析";
+  const parseLabel = parseStrategy === "local" ? "本地优先（失败转快速云端）" : cloudCount === 0 ? "本地结构化解析" : parseStrategy === "smart" ? "智能云端（大模型增强）" : "快速云端";
   return (
     <Modal open={open} onOpenChange={close} title="导入知识" description={`导入到“${kb.name}”，依次完成解析、切分和向量化。`} width="wide">
       <div className="wizard-steps" aria-label={`当前第 ${step} 步，共 3 步`}>{["选择文件", "解析与切分", "确认导入"].map((label, index) => <div key={label} className={cn(index + 1 < step && "wizard-done", index + 1 === step && "wizard-current")}><span>{index + 1 < step ? <Check size={13} /> : index + 1}</span><small>{label}</small></div>)}</div>
       {step === 1 ? <div className="wizard-body">
-        <input className="sr-only" id="knowledge-file" type="file" accept={ACCEPTED_EXTENSIONS.map((item) => `.${item}`).join(",")} onChange={(event) => { choose(event.target.files?.[0] ?? null); event.target.value = ""; }} />
-        <label className="drop-zone" htmlFor="knowledge-file"><UploadCloud size={26} /><strong>点击选择文件</strong><span>支持 Word、PDF、Markdown、图片、CSV 和 Excel，单文件最大 100 MB</span></label>
-        {file ? <div className="selected-file"><FileText size={18} /><span><strong>{file.name}</strong><small>{formatBytes(file.size)} · {local ? "本地结构化解析" : "云端文档解析"}</small></span><button className="icon-button" aria-label="移除文件" onClick={() => choose(null)}><X size={16} /></button></div> : null}
-        {fileError ? <InlineAlert>{fileError}</InlineAlert> : null}
+        <SourceImportPanel kb={kb} disabled={uploading} source={sourceTab} setSource={setSourceTab} onImported={async (document) => { await onImported(document); close(false); }} />
+        {sourceTab === "file" ? <div className="file-source-form">
+          <input className="sr-only" id="knowledge-file" type="file" multiple accept={ACCEPTED_EXTENSIONS.map((item) => `.${item}`).join(",")} onChange={(event) => { choose(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+          <input className="sr-only" id="knowledge-folder" type="file" multiple {...{ webkitdirectory: "" }} onChange={(event) => { choose(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+          <label className={cn("drop-zone", dragging && "drop-zone-active")} htmlFor="knowledge-file" onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); choose(Array.from(event.dataTransfer.files)); }}><UploadCloud size={26} /><strong>{dragging ? "松开以上传文件" : "拖入多个文件，或点击选择"}</strong><span>支持 Word、PDF、Markdown、图片、CSV 和 Excel，单文件最大 100 MB</span></label>
+          <div className="upload-secondary-action"><label className="button button-secondary" htmlFor="knowledge-folder"><Plus size={16} /><span>选择文件夹</span></label><span>文件夹内不支持的格式会单独提示并跳过</span></div>
+          {files.length ? <><div className="selected-files-summary"><strong>已选择 {files.length} 个文件</strong><span>{formatBytes(totalSize)} · 本地 {localCount} 个 / 云端 {cloudCount} 个</span></div><div className="selected-files-list">{files.map((file, index) => <div className="selected-file" key={`${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`}><FileText size={18} /><span><strong>{file.webkitRelativePath || file.name}</strong><small>{formatBytes(file.size)} · {LOCAL_PARSE_EXTENSIONS.includes(extensionOf(file.name)) ? "本地解析" : "云端解析"}</small></span><button className="icon-button" aria-label={`移除文件：${file.name}`} onClick={() => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={16} /></button></div>)}</div></> : null}
+          {fileError ? <InlineAlert>{fileError}</InlineAlert> : null}
+        </div> : null}
       </div> : null}
       {step === 2 ? <div className="wizard-body option-list">
-        {local ? <InlineAlert tone="info" title="本地结构化解析">Markdown、CSV 和 Excel 直接在服务器解析，保留标题层级、表头和工作表名，不发送到云端。</InlineAlert> : <>
-          <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "smart"} onChange={() => setParseStrategy("smart")} /><span><strong>智能解析</strong><small>开启大模型增强，更好地还原标题层级、表格和复杂版面；耗时和费用更高。</small></span><Sparkles size={18} /></label>
-          <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "fast"} onChange={() => setParseStrategy("fast")} /><span><strong>快速解析</strong><small>标准版面解析，适合结构简单的数字文档，速度更快、费用更低。</small></span><Zap size={18} /></label>
+        {cloudOptionalCount === 0 ? <InlineAlert tone="info" title="本地结构化解析">Markdown、CSV 和 Excel 直接在服务器解析，保留标题层级、表头和工作表名，不发送到云端。</InlineAlert> : <>
+          <InlineAlert tone="info" title={`预计本地 ${localCount} 个 / 云端 ${cloudCount} 个`}>本地优先不调用 DocMind；扫描件或本地无法可靠提取时回退快速云端。智能与快速云端均产生阿里云文档解析费用，具体以账号计费页为准。</InlineAlert>
+          <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "local"} onChange={() => setParseStrategy("local")} /><span><strong>本地优先</strong><small>本地解析文字型 PDF、DOCX、DOC；失败自动回退快速云端，减少云端调用。</small></span><Database size={18} /></label>
+          <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "smart"} onChange={() => setParseStrategy("smart")} /><span><strong>智能云端</strong><small>开启 DocMind 大模型增强，更好还原复杂版面；云端耗时和费用通常更高。</small></span><Sparkles size={18} /></label>
+          <label className="option-card"><input type="radio" name="parse" checked={parseStrategy === "fast"} onChange={() => setParseStrategy("fast")} /><span><strong>快速云端</strong><small>关闭大模型增强，使用标准云端版面解析，适合简单数字文档。</small></span><Zap size={18} /></label>
         </>}
-        {image ? <label className="switch-row"><span><strong>图片语义描述</strong><small>OCR 之外，由管理员配置的视觉模型补充图表和照片的语义描述</small></span><input type="checkbox" checked={enhanceImages} onChange={(event) => setEnhanceImages(event.target.checked)} aria-label="启用图片语义描述" /></label> : null}
+        {hasImages ? <label className="switch-row"><span><strong>图片语义描述</strong><small>除云端 OCR 外，调用管理员配置的视觉模型，按该模型的 Token/调用规则计费</small></span><input type="checkbox" checked={enhanceImages} onChange={(event) => setEnhanceImages(event.target.checked)} aria-label="启用图片语义描述" /></label> : null}
         <ChunkSettingsFields id="import" value={chunkForm} onChange={setChunkForm} />
-        <p className="form-hint">默认值来自知识库配置，这里的调整只作用于本次导入。</p>
+        {chunk.chunkMethod === "semantic" ? <InlineAlert tone="info" title="语义切分额外调用 Embedding">切分计算在本地执行，但相邻内容的语义向量由当前知识库绑定的 Embedding 服务生成，之后写库还会再次向量化最终分段。</InlineAlert> : null}
+        <p className="form-hint">每个文档会自动复用路由 LLM 抽取一次元数据；失败不影响正文导入。切分默认值来自知识库配置，检索时的 Rerank 和回答模型用量独立计算。</p>
         {chunkError ? <InlineAlert tone="warning">{chunkError}</InlineAlert> : null}
       </div> : null}
       {step === 3 ? <div className="wizard-body confirm-grid">
-        <div><span>文件</span><strong>{file?.name}</strong></div>
-        <div><span>大小</span><strong>{file ? formatBytes(file.size) : "—"}</strong></div>
+        <div><span>文件</span><strong>{files.length} 个</strong></div>
+        <div><span>总大小</span><strong>{formatBytes(totalSize)}</strong></div>
         <div><span>解析方式</span><strong>{parseLabel}</strong></div>
         <div><span>切分方式</span><strong>{describeChunkSettings(chunk)}</strong></div>
         <div><span>Embedding</span><strong>{kb.embeddingModelName} · {kb.vectorDimension} 维</strong></div>
-        {image ? <div><span>图片处理</span><strong>{enhanceImages ? "OCR + 视觉描述" : "仅 OCR"}</strong></div> : null}
-        {!local ? <div className="privacy-note"><ShieldAlert size={17} /><span>文档内容将发送至阿里云文档智能解析。请确认文件符合企业数据出域规范。</span></div> : null}
-        {uploading ? <div className="upload-progress" role="status"><span>{progress < 1 ? `正在上传 ${Math.round(progress * 100)}%` : "上传完成，正在创建处理任务…"}</span><span className="progress-track"><span className="progress-bar" style={{ width: `${Math.max(progress * 100, 3)}%` }} /></span></div> : null}
-        {duplicate ? <div className="wide-field"><InlineAlert tone="warning" title="文件可能重复" action={<Button onClick={() => void submit(true)} disabled={uploading}>仍然导入</Button>}>{duplicate}</InlineAlert></div> : null}
-        {submitError ? <div className="wide-field"><InlineAlert title="导入失败">{submitError}</InlineAlert></div> : null}
+        {hasImages ? <div><span>图片处理</span><strong>{enhanceImages ? "OCR + 视觉描述" : "仅 OCR"}</strong></div> : null}
+        {cloudCount || (parseStrategy === "local" && cloudOptionalCount) ? <div className="privacy-note"><ShieldAlert size={17} /><span>{cloudCount ? `${cloudCount} 个文件将使用云端解析；` : ""}{parseStrategy === "local" && cloudOptionalCount ? "本地无法可靠提取时会回退云端；" : ""}其余文件仅在本地处理。请确认符合企业数据出域规范。</span></div> : null}
+        {uploading ? <div className="upload-progress" role="status"><span>{progress < 1 ? `正在批量上传 ${Math.round(progress * 100)}%` : "上传完成，正在创建处理任务…"}</span><span className="progress-track"><span className="progress-bar" style={{ width: `${Math.max(progress * 100, 3)}%` }} /></span></div> : null}
+        {duplicate ? <div className="wide-field"><InlineAlert tone="warning" title="文件可能重复" action={<Button onClick={() => void submit(true)} disabled={uploading}>仅重试剩余文件</Button>}>{duplicate}</InlineAlert></div> : null}
+        {submitError ? <div className="wide-field"><InlineAlert title="部分文件导入失败">{submitError}</InlineAlert></div> : null}
       </div> : null}
       <div className="dialog-actions">
         <Button onClick={() => step === 1 ? close(false) : setStep(step - 1)} disabled={uploading}>{step === 1 ? "取消" : "上一步"}</Button>
-        <Button variant="primary" onClick={() => step === 3 ? void submit(false) : setStep(step + 1)} disabled={!file || Boolean(fileError) || uploading || (step >= 2 && Boolean(chunkError))}>{step === 3 ? (uploading ? "导入中…" : submitError ? "重试导入" : "开始导入") : "下一步"}</Button>
+        <Button variant="primary" onClick={() => step === 3 ? void submit(false) : setStep(step + 1)} disabled={(step === 1 && sourceTab !== "file") || !files.length || uploading || (step >= 2 && Boolean(chunkError))}>{step === 3 ? (uploading ? "导入中…" : submitError || duplicate ? "重试剩余文件" : "开始导入") : "下一步"}</Button>
       </div>
     </Modal>
   );

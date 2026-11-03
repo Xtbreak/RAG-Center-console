@@ -59,6 +59,19 @@ def test_ensure_collection_detects_dimension_mismatch(store):
         store.ensure_collection("kb", 3)
 
 
+def test_ensure_collection_tolerates_concurrent_creation(store, monkeypatch):
+    store.ensure_collection("kb", 2)
+    responses = iter([False, True])
+    monkeypatch.setattr(store._client, "collection_exists", lambda _name: next(responses))
+
+    def concurrent_conflict(*_args, **_kwargs):
+        raise RuntimeError("409 Conflict: already exists")
+
+    monkeypatch.setattr(store._client, "create_collection", concurrent_conflict)
+    store.ensure_collection("kb", 2)
+    assert store.count("kb") == 0
+
+
 def test_unreachable_server_reports_friendly_error():
     store = VectorStore(QdrantClient(url="http://127.0.0.1:9", timeout=1))
     with pytest.raises(VectorStoreError, match="Qdrant"):

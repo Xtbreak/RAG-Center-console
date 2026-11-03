@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from .chunking import DEFAULT_SEPARATORS, normalize_separators
 from .models import ModelType, ProviderHealth, Role
 
 
@@ -152,7 +153,7 @@ class ModelDefaultsRead(ModelDefaultsUpdate):
     pass
 
 
-ChunkMethodName = Literal["heading", "recursive"]
+ChunkMethodName = Literal["heading", "fixed", "recursive", "semantic"]
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -165,11 +166,16 @@ class KnowledgeBaseCreate(BaseModel):
     chunk_overlap: int = Field(default=120, ge=0, le=1000)
     chunk_method: ChunkMethodName = "heading"
     heading_level: int = Field(default=6, ge=1, le=6)
+    separators: list[str] = Field(default_factory=lambda: list(DEFAULT_SEPARATORS[:-1]), max_length=20)
+    semantic_threshold: float = Field(default=0.75, gt=0, lt=1)
 
     @model_validator(mode="after")
     def overlap_smaller_than_size(self):
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError("分段重叠必须小于分段长度")
+        if not self.separators:
+            raise ValueError("递归切分至少需要一个分隔符")
+        self.separators = list(normalize_separators(self.separators)[:-1])
         self.tags = _clean_route_texts(self.tags, 50, "标签")
         self.sample_questions = _clean_route_texts(self.sample_questions, 300, "示例问题")
         return self
@@ -185,9 +191,15 @@ class KnowledgeBaseUpdate(BaseModel):
     chunk_overlap: int | None = Field(default=None, ge=0, le=1000)
     chunk_method: ChunkMethodName | None = None
     heading_level: int | None = Field(default=None, ge=1, le=6)
+    separators: list[str] | None = Field(default=None, max_length=20)
+    semantic_threshold: float | None = Field(default=None, gt=0, lt=1)
 
     @model_validator(mode="after")
     def clean_route_fields(self):
+        if self.separators is not None:
+            if not self.separators:
+                raise ValueError("递归切分至少需要一个分隔符")
+            self.separators = list(normalize_separators(self.separators)[:-1])
         if self.tags is not None:
             self.tags = _clean_route_texts(self.tags, 50, "标签")
         if self.sample_questions is not None:
@@ -208,6 +220,8 @@ class KnowledgeBaseRead(BaseModel):
     chunk_overlap: int
     chunk_method: str
     heading_level: int
+    separators: list[str]
+    semantic_threshold: float
     status: str
     rebuild_error: str | None
     document_count: int
@@ -234,6 +248,11 @@ class DocumentRead(BaseModel):
     chunk_size: int
     chunk_overlap: int
     heading_level: int
+    separators: list[str]
+    semantic_threshold: float
+    metadata: dict[str, list[str]]
+    metadata_status: str
+    metadata_error: str | None
     chunk_count: int
     job_id: str | None
     job_status: str | None
@@ -314,6 +333,7 @@ class RetrievalTestResponse(BaseModel):
 class ChatStreamRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
+    agent_id: str | None = None
 
 
 class ChatCitationRead(BaseModel):
@@ -347,6 +367,70 @@ class ConversationRead(BaseModel):
 
 class ConversationDetail(ConversationRead):
     messages: list[ChatMessageRead]
+
+
+class ModelCallLogRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    provider: str
+    model_id: str
+    protocol: str
+    purpose: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    estimated: bool
+    latency_ms: float
+    retry_count: int
+    status: str
+    error_message: str | None
+    created_at: datetime
+
+
+class QueryLogSummaryRead(BaseModel):
+    id: str
+    conversation_id: str | None
+    question: str
+    status: str
+    grounded: bool
+    route: list[dict]
+    first_token_ms: float | None
+    total_ms: float | None
+    retry_count: int
+    total_tokens: int
+    estimated: bool
+    error_message: str | None
+    created_at: datetime
+
+
+class QueryLogDetailRead(QueryLogSummaryRead):
+    answer: str
+    citations: list[dict]
+    route_candidates: list[dict]
+    route_ms: float
+    retrieval_ms: float
+    rerank_ms: float
+    completed_at: datetime | None
+    model_calls: list[ModelCallLogRead]
+
+
+class QueryLogPage(BaseModel):
+    items: list[QueryLogSummaryRead]
+    total: int
+
+
+class QueryLogStats(BaseModel):
+    today_count: int
+    average_total_ms: float | None
+
+
+class LogRetentionRead(BaseModel):
+    days: int
+
+
+class LogRetentionUpdate(BaseModel):
+    days: int = Field(ge=1, le=3650)
 
 
 def _clean_route_texts(values: list[str], max_length: int, label: str) -> list[str]:

@@ -219,11 +219,17 @@ async def test_stream_text_normalizes_provider_events(protocol, events, expected
         return httpx.Response(200, text=body)
 
     target = ProbeTarget("p", "custom", "https://provider.test/v1", "secret", "chat-model", protocol, 3)
+    usage_events = []
+    if protocol == "OpenAI Responses":
+        events.append({"type": "response.completed", "response": {"usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}})
+    else:
+        events.append({"usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         chunks = [chunk async for chunk in stream_text(
-            target, [{"role": "user", "content": "问题"}], client=client
+            target, [{"role": "user", "content": "问题"}], client=client, on_usage=usage_events.append
         )]
     assert "".join(chunks) == expected
+    assert usage_events == [{"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}]
 
 
 @pytest.mark.asyncio

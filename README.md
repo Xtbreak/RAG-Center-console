@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-阶段 4：自动路由、混合检索与在线对话已完成实现和模块自测，按用户要求暂不进行阶段验收。阶段 3 的视觉描述与剩余文件扩展名验证仍未完成验收。
+阶段 0–5 均已完成并通过验收：模型配置、全格式导入、视觉描述、自动选库、混合检索、流式问答、运行日志、并发、任务恢复和备份恢复均已验证。
 
 阶段状态和验收记录以 `DEVELOPMENT_WORKFLOW.md` 为唯一依据。
 
@@ -12,6 +12,7 @@
 
 - [开发计划](./DEVELOPMENT_PLAN.md)
 - [开发流程与进度](./DEVELOPMENT_WORKFLOW.md)
+- [部署、运维与恢复手册](./docs/OPERATIONS.md)
 
 ## 当前工程
 
@@ -49,11 +50,11 @@ uv run celery -A rag_center_console.worker worker --pool=threads --loglevel=info
 uv run celery -A rag_center_console.worker beat --loglevel=info
 ```
 
-Worker 必须使用 `--pool=threads`：Python 3.15 下 Celery 默认的 prefork 进程池无法执行任务。Beat 每 5 分钟把长时间无进展的导入任务重新排队。导入 PDF、Word 和图片需在 `.env` 中配置 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_ID` 和 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_SECRET`。
+Worker 必须使用 `--pool=threads`：Python 3.15 下 Celery 默认的 prefork 进程池无法执行任务。Beat 每 5 分钟把长时间无进展的导入任务重新排队，并每小时清理过期查询日志。默认本地优先解析文字型 PDF、DOCX 和 DOC；DOC 本地转换需要 LibreOffice（macOS 可使用 `textutil`）。扫描件回退、图片 OCR 及智能/快速云端解析需在 `.env` 中配置 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_ID` 和 `RAG_ALIYUN_DOCMIND_ACCESS_KEY_SECRET`。
 
 浏览器访问 `http://localhost:3000`，API 文档位于 `http://localhost:8000/docs`。当前版本默认以零数据空状态启动，不包含预置业务示例。
 
-安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、RustFS、API 和 Web。
+安装 Docker 后，可在填写 `.env` 后使用 `docker compose up --build` 启动 PostgreSQL、Qdrant、Redis、RustFS、API、Worker、Beat 和 Web。
 
 质量检查：
 

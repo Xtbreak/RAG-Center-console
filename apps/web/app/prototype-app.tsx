@@ -15,7 +15,6 @@ import {
   KeyRound,
   Layers3,
   LayoutDashboard,
-  ListFilter,
   Menu,
   MessageCircle,
   Plus,
@@ -33,6 +32,9 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChatView } from "./chat-view";
 import { KnowledgeView } from "./knowledge-views";
+import { LogsView } from "./logs-view";
+import { ObservabilityView } from "./observability-view";
+import { AgentsView, InsightsView, SettingsView, ToolsView, WorkbenchView } from "./product-views";
 import {
   checkProvider,
   createModel,
@@ -40,10 +42,15 @@ import {
   deleteProvider,
   discoverProviderModels,
   getModelDefaults,
+  getQueryLogStats,
   getSession,
   listKnowledgeBases,
+  listAgents,
+  type AgentApp,
   listModels,
   listProviders,
+  listQueryLogs,
+  type QueryLogSummary,
   updateModel,
   updateModelDefaults,
   updateProvider,
@@ -62,7 +69,7 @@ import {
   type Role,
 } from "./prototype-models";
 
-type ViewKey = "overview" | "knowledge" | "chat" | "models" | "logs";
+type ViewKey = "workbench" | "apps" | "knowledge" | "chat" | "tools" | "insights" | "observability" | "settings" | "logs";
 
 const capabilityModelTypes: Record<string, ModelInstance["modelType"]> = {
   LLM: "llm",
@@ -113,18 +120,25 @@ function inferModelTypeFromId(modelId: string): { modelType: ModelInstance["mode
 }
 
 const navigation: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: Role[] }> = [
-  { key: "overview", label: "系统概览", icon: LayoutDashboard, roles: ["admin", "manager"] },
+  { key: "workbench", label: "工作台", icon: LayoutDashboard, roles: ["admin", "manager"] },
+  { key: "apps", label: "应用", icon: Bot, roles: ["admin", "manager"] },
   { key: "knowledge", label: "知识库", icon: Database, roles: ["admin", "manager"] },
-  { key: "chat", label: "在线对话", icon: MessageCircle, roles: ["admin", "manager", "user"] },
-  { key: "models", label: "模型服务", icon: Bot, roles: ["admin"] },
-  { key: "logs", label: "运行日志", icon: Activity, roles: ["admin"] },
+  { key: "chat", label: "对话", icon: MessageCircle, roles: ["admin", "manager", "user"] },
+  { key: "tools", label: "工具", icon: KeyRound, roles: ["admin", "manager"] },
+  { key: "insights", label: "洞察", icon: Gauge, roles: ["admin", "manager"] },
+  { key: "observability", label: "观测", icon: Activity, roles: ["admin"] },
+  { key: "settings", label: "设置", icon: Settings2, roles: ["admin", "manager"] },
 ];
 
 const titles: Record<ViewKey, { title: string; subtitle: string }> = {
-  overview: { title: "系统概览", subtitle: "查看知识处理、模型服务和问答链路的运行状态" },
+  workbench: { title: "工作台", subtitle: "管理知识资产，构建可使用的企业应用" },
+  apps: { title: "应用", subtitle: "配置提示词、知识库和对话发布状态" },
   knowledge: { title: "知识库", subtitle: "组织企业资料，控制解析、切分和检索质量" },
-  chat: { title: "在线对话", subtitle: "系统会自动选择相关知识库，并在回答中标注原始依据" },
-  models: { title: "模型服务", subtitle: "管理供应商、模型能力、默认用途和连接状态" },
+  chat: { title: "应用对话", subtitle: "基于已发布应用和企业知识回答问题" },
+  tools: { title: "工具与模型", subtitle: "统一管理应用可用的模型和工具" },
+  insights: { title: "数据洞察", subtitle: "查看知识资产、问答质量与评测标注" },
+  observability: { title: "观测中心", subtitle: "追踪 Agent、知识构建、工具调用、对话和估算费用" },
+  settings: { title: "设置", subtitle: "管理外观、访问边界和 API 密钥" },
   logs: { title: "运行日志", subtitle: "检查查询内容、路由结果、Token 消耗和链路耗时" },
 };
 
@@ -186,7 +200,7 @@ export function PrototypeApp() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const current = (pathname.split("/")[1] || "overview") as ViewKey;
+  const current = (pathname.split("/")[1] || "workbench") as ViewKey;
   const [role, setRole] = useState<Role>("admin");
   const [roleReady, setRoleReady] = useState(false);
   const [rolePickerOpen, setRolePickerOpen] = useState(false);
@@ -196,12 +210,21 @@ export function PrototypeApp() {
   const [knowledgeBasesLoaded, setKnowledgeBasesLoaded] = useState(false);
   const [knowledgeBasesError, setKnowledgeBasesError] = useState<string | null>(null);
   const [modelProviders, setModelProviders] = useState<ModelProvider[]>([]);
+  const [agents, setAgents] = useState<AgentApp[]>([]);
+  const selectedId = pathname.split("/")[2] || undefined;
+  const [logStats, setLogStats] = useState<{ todayCount: number; averageTotalMs: number | null } | null>(null);
+  const [recentLogs, setRecentLogs] = useState<QueryLogSummary[]>([]);
   const setToast = (message: string) => setToastState({ message, tone: "success" });
   const setWarningToast = (message: string) => setToastState({ message, tone: "warning" });
   const setErrorToast = (message: string) => setToastState({ message, tone: "error" });
 
   const allowedNavigation = useMemo(() => navigation.filter((item) => item.roles.includes(role)), [role]);
-  const selectedKb = searchParams.get("kb") ?? undefined;
+  const selectedKb = current === "knowledge" ? selectedId : searchParams.get("kb") ?? undefined;
+
+  useEffect(() => {
+    if (!roleReady) return;
+    listAgents().then(setAgents).catch(() => setAgents([]));
+  }, [current, roleReady, role]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem("rag-role") as Role | null;
@@ -237,9 +260,20 @@ export function PrototypeApp() {
   }, [refreshKnowledgeBases, role, roleReady]);
 
   useEffect(() => {
+    if (!roleReady || role !== "admin") {
+      setLogStats(null);
+      setRecentLogs([]);
+      return;
+    }
+    Promise.all([getQueryLogStats(), listQueryLogs({ offset: 0, limit: 3 })])
+      .then(([stats, recent]) => { setLogStats(stats); setRecentLogs(recent.items); })
+      .catch(() => { setLogStats(null); setRecentLogs([]); });
+  }, [current, role, roleReady]);
+
+  useEffect(() => {
     if (!roleReady) return;
     const allowed = allowedNavigation.some((item) => item.key === current);
-    if (!allowed) router.replace(role === "user" ? "/chat" : "/overview");
+    if (!allowed) router.replace(role === "user" ? "/chat" : "/workbench");
   }, [allowedNavigation, current, role, roleReady, router]);
 
   useEffect(() => {
@@ -253,7 +287,7 @@ export function PrototypeApp() {
     window.localStorage.setItem("rag-role", nextRole);
     setRolePickerOpen(false);
     setMobileNav(false);
-    router.push(nextRole === "user" ? "/chat" : "/overview");
+    router.push(nextRole === "user" ? "/chat" : "/workbench");
     try {
       await updateSessionRole(nextRole);
       setToast(`已切换为${roleCopy[nextRole].name}`);
@@ -267,7 +301,7 @@ export function PrototypeApp() {
     setMobileNav(false);
   };
 
-  const activeView = titles[current] ? current : "overview";
+  const activeView = titles[current] ? current : "workbench";
   const processingDocumentCount = knowledgeBases.reduce((total, kb) => total + kb.processingDocumentCount, 0);
   const chunkCount = knowledgeBases.reduce((total, kb) => total + kb.chunkCount, 0);
 
@@ -307,33 +341,26 @@ export function PrototypeApp() {
       {mobileNav ? <button className="mobile-scrim" onClick={() => setMobileNav(false)} aria-label="关闭导航遮罩" /> : null}
 
       <div className="workspace">
-        <header className="topbar">
-          <button className="icon-button menu-button" onClick={() => setMobileNav(true)} aria-label="打开导航"><Menu size={20} /></button>
-          <div className="global-search">
-            <Search size={17} aria-hidden="true" />
-            <label htmlFor="global-search" className="sr-only">搜索知识库、文档或日志</label>
-            <input id="global-search" placeholder="搜索知识库、文档或日志" />
-            <kbd>⌘ K</kbd>
-          </div>
-          <div className="topbar-actions">
-            <span className="environment"><span aria-hidden="true" />内网环境</span>
-            <button className="icon-button" aria-label="系统设置"><Settings2 size={18} /></button>
-          </div>
-        </header>
-
         <main id="main-content" className="main-content" tabIndex={-1}>
           <div className="page-heading">
+            <button className="icon-button menu-button" onClick={() => setMobileNav(true)} aria-label="打开导航"><Menu size={20} /></button>
             <div>
               <h1>{selectedKb && activeView === "knowledge" ? "知识库详情" : titles[activeView].title}</h1>
               <p>{titles[activeView].subtitle}</p>
             </div>
           </div>
 
-          {activeView === "overview" ? <OverviewView navigate={navigate} knowledgeBaseCount={knowledgeBases.length} chunkCount={chunkCount} processingDocumentCount={processingDocumentCount} providerCount={modelProviders.length} /> : null}
-          {activeView === "knowledge" ? <KnowledgeView selectedId={selectedKb} router={router} role={role} setToast={setToast} knowledgeBases={knowledgeBases} loaded={knowledgeBasesLoaded} loadError={knowledgeBasesError} refreshKnowledgeBases={refreshKnowledgeBases} /> : null}
-          {activeView === "chat" ? <ChatView navigate={navigate} role={role} hasKnowledgeBase={knowledgeBases.length > 0} readyForChat={knowledgeBases.some((kb) => kb.readyDocumentCount > 0)} sessionReady={roleReady} /> : null}
-          {activeView === "models" ? <ModelsView setToast={setToast} setWarningToast={setWarningToast} setErrorToast={setErrorToast} providers={modelProviders} setProviders={setModelProviders} /> : null}
-          {activeView === "logs" ? <LogsView /> : null}
+          {!roleReady ? <div className="loading-panel" role="status">正在初始化工作区…</div> : <>
+            {activeView === "workbench" ? <WorkbenchView knowledgeBases={knowledgeBases} agents={agents} /> : null}
+            {activeView === "apps" ? <AgentsView selectedId={selectedId} knowledgeBases={knowledgeBases} setToast={setToast} setErrorToast={setErrorToast} /> : null}
+            {activeView === "knowledge" ? <KnowledgeView selectedId={selectedKb} router={router} role={role} setToast={setToast} knowledgeBases={knowledgeBases} loaded={knowledgeBasesLoaded} loadError={knowledgeBasesError} refreshKnowledgeBases={refreshKnowledgeBases} /> : null}
+            {activeView === "chat" ? <ChatView key={selectedId ?? "global"} agent={agents.find((item) => item.id === selectedId)} agents={agents} navigate={navigate} role={role} hasKnowledgeBase={knowledgeBases.length > 0} readyForChat={selectedId ? Boolean(agents.find((item) => item.id === selectedId)?.knowledge_base_ids.length) : knowledgeBases.some((kb) => kb.readyDocumentCount > 0)} sessionReady={roleReady} /> : null}
+            {activeView === "tools" ? <ToolsView role={role} setToast={setToast} setWarningToast={setWarningToast} setErrorToast={setErrorToast} providers={modelProviders} setProviders={setModelProviders} /> : null}
+            {activeView === "insights" ? <InsightsView /> : null}
+            {activeView === "observability" ? <ObservabilityView sessionReady={roleReady} setToast={setToast} setErrorToast={setErrorToast} /> : null}
+            {activeView === "settings" ? <SettingsView role={role} setToast={setToast} setErrorToast={setErrorToast} /> : null}
+            {activeView === "logs" ? <LogsView sessionReady={roleReady} /> : null}
+          </>}
         </main>
       </div>
 
@@ -348,23 +375,23 @@ function windowSafeHasRole() {
   return Boolean(window.localStorage.getItem("rag-role"));
 }
 
-function OverviewView({ navigate, knowledgeBaseCount, chunkCount, processingDocumentCount, providerCount }: { navigate: (view: ViewKey) => void; knowledgeBaseCount: number; chunkCount: number; processingDocumentCount: number; providerCount: number }) {
+function OverviewView({ navigate, knowledgeBaseCount, chunkCount, processingDocumentCount, providerCount, logStats, recentLogs }: { navigate: (view: ViewKey) => void; knowledgeBaseCount: number; chunkCount: number; processingDocumentCount: number; providerCount: number; logStats: { todayCount: number; averageTotalMs: number | null } | null; recentLogs: QueryLogSummary[] }) {
   return (
     <div className="content-stack">
       <div className="notice-banner" role="note">
         <ShieldAlert size={18} aria-hidden="true" />
         <div><strong>当前未启用身份认证</strong><span>角色仅用于演示功能边界。接入企业 SSO 前，请勿作为真实权限控制使用。</span></div>
-        <button onClick={() => navigate("models")}>查看系统配置<ArrowRight size={15} aria-hidden="true" /></button>
+        <button onClick={() => navigate("tools")}>查看系统配置<ArrowRight size={15} aria-hidden="true" /></button>
       </div>
 
       <section className="metric-strip" aria-label="关键指标">
         <Metric label="知识库" value={String(knowledgeBaseCount)} note={knowledgeBaseCount ? `${processingDocumentCount} 个文档处理中` : "尚未创建"} icon={Database} />
         <Metric label="知识分段" value={chunkCount.toLocaleString()} note={chunkCount ? "已切分并向量化" : "尚未生成"} icon={Layers3} />
-        <Metric label="今日问答" value="0" note="暂无调用" icon={MessageCircle} />
-        <Metric label="平均耗时" value="—" note="暂无数据" icon={Gauge} />
+        <Metric label="今日问答" value={logStats ? String(logStats.todayCount) : "—"} note={logStats ? "真实调用记录" : "仅管理员可查看"} icon={MessageCircle} />
+        <Metric label="平均耗时" value={logStats?.averageTotalMs != null ? `${(logStats.averageTotalMs / 1000).toFixed(2)} s` : "—"} note={logStats?.averageTotalMs != null ? "已完成问答" : "暂无数据"} icon={Gauge} />
       </section>
 
-      <div className="overview-grid">
+      <div className="workbench-grid">
         <section className="panel pipeline-panel">
           <div className="panel-heading">
             <div><h2>知识处理轨道</h2><p>查看文件解析、切分和向量化进度</p></div>
@@ -375,19 +402,19 @@ function OverviewView({ navigate, knowledgeBaseCount, chunkCount, processingDocu
 
         <section className="panel model-health">
           <div className="panel-heading compact"><div><h2>模型健康</h2><p>{providerCount ? `${providerCount} 个供应商已配置` : "尚未配置供应商"}</p></div></div>
-          <EmptyState compact icon={Bot} title="暂无健康数据" description="配置模型供应商后可执行连接检测。" action={<Button onClick={() => navigate("models")}>配置模型服务</Button>} />
+          <EmptyState compact icon={Bot} title="暂无健康数据" description="配置模型供应商后可执行连接检测。" action={<Button onClick={() => navigate("tools")}>配置模型服务</Button>} />
         </section>
       </div>
 
       <section className="panel">
-        <div className="panel-heading compact"><div><h2>最近问答</h2><p>包含自动选库和端到端耗时</p></div></div>
-        <EmptyState compact icon={MessageCircle} title="暂无问答记录" description="完成首次在线问答后，调用摘要会显示在这里。" />
+        <div className="panel-heading compact"><div><h2>最近问答</h2><p>包含自动选库和端到端耗时</p></div>{recentLogs.length ? <Button variant="ghost" onClick={() => navigate("logs")}>查看全部<ArrowRight size={14} /></Button> : null}</div>
+        {recentLogs.length ? <div className="recent-log-list">{recentLogs.map((log) => <button key={log.id} onClick={() => navigate("logs")}><span><strong>{log.question}</strong><small>{log.route.length ? log.route.map((route) => route.name).join("、") : "未选库"}</small></span><StatusBadge status={log.status === "completed" ? "success" : "error"}>{log.status === "completed" ? "成功" : "失败"}</StatusBadge><span>{log.totalMs === null ? "—" : `${(log.totalMs / 1000).toFixed(2)} s`}</span></button>)}</div> : <EmptyState compact icon={MessageCircle} title={logStats ? "暂无问答记录" : "仅管理员可查看"} description={logStats ? "完成首次在线问答后，调用摘要会显示在这里。" : "知识库管理人员和使用者的全局问答日志保持隔离。"} />}
       </section>
     </div>
   );
 }
 
-function ModelsView({ setToast, setWarningToast, setErrorToast, providers, setProviders }: { setToast: (message: string) => void; setWarningToast: (message: string) => void; setErrorToast: (message: string) => void; providers: ModelProvider[]; setProviders: (providers: ModelProvider[]) => void }) {
+export function ModelsView({ setToast, setWarningToast, setErrorToast, providers, setProviders }: { setToast: (message: string) => void; setWarningToast: (message: string) => void; setErrorToast: (message: string) => void; providers: ModelProvider[]; setProviders: (providers: ModelProvider[]) => void }) {
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<ModelProvider | null>(null);
   const [models, setModels] = useState<ModelInstance[]>([]);
@@ -759,15 +786,4 @@ function AddModelModal({ open, providers, onOpenChange, setToast, setErrorToast,
     }
   };
   return <Modal open={open} onOpenChange={onOpenChange} title="添加模型实例" description="输入模型 ID 后，系统自动识别类别并匹配调用协议。"><div className="modal-form"><label><span>供应商</span><select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label><label><span>模型 ID</span><input autoFocus value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="填写供应商公布的模型 ID" /></label>{modelId.trim() ? <div className="form-row"><div className="model-auto-value"><span>模型类别</span><strong>{modelTypeLabel(modelType)}</strong></div><div className="model-auto-value"><span>调用协议</span><strong>{protocol}</strong></div></div> : null}{modelType === "embedding" && modelId.trim() ? <label><span>向量维度（必填）</span><input type="number" min="1" value={dimension} onChange={(event) => setDimension(event.target.value)} /></label> : null}</div><div className="dialog-actions"><Button onClick={() => onOpenChange(false)} disabled={saving}>取消</Button><Button variant="primary" onClick={submit} disabled={saving || !providerId || !modelId.trim() || (modelType === "embedding" && !Number(dimension))}>{saving ? "添加中…" : "添加模型"}</Button></div></Modal>;
-}
-
-function LogsView() {
-  return (
-    <div className="logs-layout logs-layout-empty">
-      <section className="panel table-panel logs-table-panel">
-        <div className="log-filters"><div className="search-box"><Search size={16} /><input aria-label="搜索查询内容" placeholder="搜索查询内容" disabled /></div><label><span className="sr-only">状态</span><select disabled value="all"><option value="all">全部状态</option></select></label><Button icon={ListFilter} disabled>更多筛选</Button></div>
-        <EmptyState icon={Activity} title="还没有查询日志" description="完成在线问答后，查询、路由、Token、耗时和错误记录会显示在这里。" />
-      </section>
-    </div>
-  );
 }

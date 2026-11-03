@@ -14,11 +14,13 @@ import {
   Sparkles,
   UserRound,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getConversation,
   listConversations,
   streamChat,
+  type AgentApp,
   type ChatStreamEvent,
 } from "./api-client";
 import type {
@@ -31,11 +33,13 @@ import type {
 import { Button, EmptyState, cn } from "./ui";
 
 type ChatViewProps = {
-  navigate: (view: "knowledge") => void;
+  navigate: (view: "knowledge" | "apps") => void;
   role: Role;
   hasKnowledgeBase: boolean;
   readyForChat: boolean;
   sessionReady: boolean;
+  agent?: AgentApp;
+  agents: AgentApp[];
 };
 
 function errorMessage(error: unknown, fallback: string) {
@@ -66,7 +70,8 @@ function lastAssistantMessage(messages: ChatMessage[]) {
   return undefined;
 }
 
-export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessionReady }: ChatViewProps) {
+export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessionReady, agent, agents }: ChatViewProps) {
+  const router = useRouter();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -77,6 +82,7 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
   const [stage, setStage] = useState<string | null>(null);
   const [route, setRoute] = useState<ChatRouteSelection[]>([]);
   const [citations, setCitations] = useState<ChatCitation[]>([]);
+  const [citationsOpen, setCitationsOpen] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastQuestion, setLastQuestion] = useState("");
@@ -223,7 +229,7 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
     };
 
     try {
-      await streamChat({ question, conversationId }, handleEvent, controller.signal);
+      await streamChat({ question, conversationId, agentId: agent?.id }, handleEvent, controller.signal);
       if (conversationId) {
         const canonical = await getConversation(conversationId);
         setMessages(canonical.messages);
@@ -250,7 +256,8 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
     }
   };
 
-  const disabledReason = hasKnowledgeBase ? "文档完成解析和向量化后，即可开始在线对话。" : role === "user"
+  const needsKnowledgeBaseBinding = Boolean(agent && !agent.knowledge_base_ids.length);
+  const disabledReason = needsKnowledgeBaseBinding ? "当前应用尚未绑定知识库。请先在应用配置中选择用于检索的知识库，已有文档无需重复导入。" : hasKnowledgeBase ? "文档完成解析和向量化后，即可开始在线对话。" : role === "user"
     ? "请联系知识库管理人员创建知识库并导入资料。"
     : "先创建知识库并导入企业资料，系统才能自动选库并生成带引用的回答。";
 
@@ -258,7 +265,7 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
     return (
       <div className="chat-layout chat-layout-empty">
         <section className="chat-panel">
-          <div className="chat-empty"><div className="chat-orbit"><Sparkles size={24} /></div><h2>{hasKnowledgeBase ? "知识库还没有可检索内容" : "还没有可用于问答的知识库"}</h2><p>{disabledReason}</p>{role !== "user" ? <Button variant="primary" icon={Database} onClick={() => navigate("knowledge")}>{hasKnowledgeBase ? "查看知识库" : "创建知识库"}</Button> : null}</div>
+          <div className="chat-empty"><div className="chat-orbit"><Sparkles size={24} /></div><h2>{needsKnowledgeBaseBinding ? "应用尚未绑定知识库" : hasKnowledgeBase ? "知识库还没有可检索内容" : "还没有可用于问答的知识库"}</h2><p>{disabledReason}</p>{role !== "user" ? <Button variant="primary" icon={Database} onClick={() => needsKnowledgeBaseBinding && agent ? router.push(`/apps/${agent.id}`) : navigate("knowledge")}>{needsKnowledgeBaseBinding ? "去绑定知识库" : hasKnowledgeBase ? "查看知识库" : "创建知识库"}</Button> : null}</div>
           <div className="composer composer-disabled"><label htmlFor="chat-input" className="sr-only">输入问题</label><textarea id="chat-input" disabled placeholder="知识库可检索后开放输入" /><div className="composer-footer"><span><Sparkles size={14} />全库自动路由</span><button disabled aria-label="发送问题"><ArrowRight size={18} /></button></div></div>
         </section>
       </div>
@@ -269,28 +276,35 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
     <div className="chat-layout">
       <section className="chat-panel">
         <div className="chat-toolbar">
+          <Bot size={16} aria-hidden="true" />
+          <label htmlFor="agent-select" className="sr-only">选择对话应用</label>
+          <select id="agent-select" value={agent?.id ?? ""} disabled={streaming} onChange={(event) => router.push(event.target.value ? `/chat/${event.target.value}` : "/chat")}>
+            <option value="">全库知识问答</option>
+            {agents.map((item) => <option key={item.id} value={item.id}>{item.name}{item.published ? "" : "（草稿）"}</option>)}
+          </select>
           <label htmlFor="conversation-select" className="sr-only">选择历史对话</label>
           <History size={15} aria-hidden="true" />
           <select id="conversation-select" value={selectedConversationId ?? ""} onChange={(event) => event.target.value ? void openConversation(event.target.value) : startNewConversation()} disabled={streaming}>
             <option value="">新对话</option>
             {conversations.map((conversation) => <option key={conversation.id} value={conversation.id}>{conversation.title}</option>)}
           </select>
+          {agent?.show_citations === false ? null : <button className="citation-toggle" onClick={() => setCitationsOpen(true)}><FileText size={15} />引用{citations.length ? `（${citations.length}）` : ""}</button>}
           <Button icon={Plus} onClick={startNewConversation} disabled={streaming}>新对话</Button>
         </div>
 
         <div className="conversation" aria-live="polite" aria-busy={streaming}>
           {loadingHistory ? <div className="chat-loading" role="status">正在加载对话…</div> : null}
           {historyError ? <div className="chat-error" role="alert"><ShieldAlert size={16} /><span>{historyError}</span><Button icon={RefreshCw} onClick={() => selectedConversationId ? void openConversation(selectedConversationId) : void refreshConversations()}>重试</Button></div> : null}
-          {!loadingHistory && !historyError && !messages.length ? <div className="chat-empty chat-empty-ready"><div className="chat-orbit"><Sparkles size={24} /></div><h2>从企业知识中获得有依据的回答</h2><p>输入问题后，系统会自动选择最多 3 个知识库，执行混合检索，并展示引用来源。</p></div> : null}
+          {!loadingHistory && !historyError && !messages.length ? <div className="chat-empty chat-empty-ready"><div className="chat-orbit"><Sparkles size={24} /></div><h2>{agent?.name || "从企业知识中获得有依据的回答"}</h2><p>{agent?.opening || (agent ? "输入问题，应用将从绑定的知识库检索依据并回答。" : "输入问题后，系统会自动选择最多 3 个知识库，执行混合检索，并展示引用来源。")}</p>{agent?.suggestions.length ? <div className="chat-suggestions">{agent.suggestions.filter((item) => item.trim()).map((suggestion) => <button key={suggestion} onClick={() => void send(suggestion)}>{suggestion}<ArrowRight size={14} /></button>)}</div> : null}</div> : null}
           {messages.map((message) => (
             <article key={message.id} className={cn("message", message.role === "user" ? "user-message" : "assistant-message", message.status === "failed" && "message-failed")}>
               <span className="message-avatar" aria-hidden="true">{message.role === "user" ? <UserRound size={16} /> : <Bot size={16} />}</span>
               <div>
                 <strong>{message.role === "user" ? "你" : "知识助手"}</strong>
-                {message.role === "assistant" && message.route.length ? <div className="routing-card"><div className="routing-title"><Route size={15} /><strong>已自动选择知识库</strong><span>{message.route.length} 个</span></div><div className="routing-kbs">{message.route.map((item) => <span key={item.knowledgeBaseId}>{item.name} <em>匹配 {item.score.toFixed(3)}</em></span>)}</div></div> : null}
+                {message.role === "assistant" && message.route.length ? <details className="routing-card"><summary className="routing-title"><Route size={15} /><strong>{agent ? "应用使用知识库" : "已自动选择知识库"}</strong><span>{message.route.length} 个</span></summary><div className="routing-kbs">{message.route.map((item) => <span key={item.knowledgeBaseId}>{item.name} <em>匹配 {item.score.toFixed(3)}</em></span>)}</div></details> : null}
                 <p className="message-content">{message.content}{streaming && message.id.startsWith("stream-assistant-") ? <span className="stream-cursor" aria-hidden="true" /> : null}</p>
                 {message.errorMessage ? <small className="message-error">{message.errorMessage}</small> : null}
-                {message.role === "assistant" && message.citations.length ? <div className="answer-footer"><span>回答引用 {message.citations.length} 个知识分段</span><button onClick={() => setCitations(message.citations)}><FileText size={14} />查看引用</button></div> : null}
+                {message.role === "assistant" && message.citations.length ? <div className="answer-footer"><span>回答引用 {message.citations.length} 个知识分段</span><button onClick={() => { setCitations(message.citations); setCitationsOpen(true); }}><FileText size={14} />查看引用</button></div> : null}
               </div>
             </article>
           ))}
@@ -316,15 +330,18 @@ export function ChatView({ navigate, role, hasKnowledgeBase, readyForChat, sessi
               }
             }}
           />
-          <div className="composer-footer"><span><Sparkles size={14} />全库自动路由 · Enter 发送，Shift + Enter 换行</span><button onClick={() => void send()} disabled={!draft.trim() || streaming} aria-label={streaming ? "正在生成回答" : "发送问题"}><ArrowRight size={18} /></button></div>
+          <div className="composer-footer"><span><Sparkles size={14} />{agent ? "应用指定知识库" : "全库自动路由"} · Enter 发送，Shift + Enter 换行</span><button onClick={() => void send()} disabled={!draft.trim() || streaming} aria-label={streaming ? "正在生成回答" : "发送问题"}><ArrowRight size={18} /></button></div>
         </div>
       </section>
 
-      <aside className="citation-panel" aria-label="回答引用">
-        <div className="citation-heading"><div><h2>引用来源</h2><p>{citations.length ? `${citations.length} 个知识分段` : "回答生成后显示原始依据"}</p></div><FileText size={18} aria-hidden="true" /></div>
-        {citations.length ? citations.map((citation) => <article className="citation-item" key={`${citation.chunkId}-${citation.index}`}><div><span className="citation-index">[{citation.index}]</span><strong>{citation.filename}</strong></div><small>{citation.knowledgeBaseName} · {sourceLocation(citation)}</small><p>{citation.content}</p></article>) : <EmptyState compact icon={MessageCircle} title="暂无引用" description="发送问题后，引用文件和原文位置会显示在这里。" />}
-        {route.length ? <div className="route-detail"><h3>自动选库</h3><dl>{route.map((item) => <div key={item.knowledgeBaseId}><dt>{item.name}</dt><dd>{item.score.toFixed(3)}</dd></div>)}</dl></div> : null}
-      </aside>
+      {agent?.show_citations === false ? null : <>
+        {citationsOpen ? <button className="citation-scrim" aria-label="关闭引用来源" onClick={() => setCitationsOpen(false)} /> : null}
+        <aside className={cn("citation-panel", citationsOpen && "citation-panel-open")} aria-label="回答引用">
+          <div className="citation-heading"><div><h2>引用来源</h2><p>{citations.length ? `${citations.length} 个知识分段` : "回答生成后显示原始依据"}</p></div><div className="citation-heading-actions"><FileText size={18} aria-hidden="true" /><button className="citation-close" onClick={() => setCitationsOpen(false)}>关闭</button></div></div>
+          {citations.length ? citations.map((citation) => <article className="citation-item" key={`${citation.chunkId}-${citation.index}`}><div><span className="citation-index">[{citation.index}]</span><strong>{citation.filename}</strong></div><small>{citation.knowledgeBaseName} · {sourceLocation(citation)}</small><p>{citation.content}</p></article>) : <EmptyState compact icon={MessageCircle} title="暂无引用" description="发送问题后，引用文件和原文位置会显示在这里。" />}
+          {route.length ? <div className="route-detail"><h3>{agent ? "应用知识库" : "自动选库"}</h3><dl>{route.map((item) => <div key={item.knowledgeBaseId}><dt>{item.name}</dt><dd>{item.score.toFixed(3)}</dd></div>)}</dl></div> : null}
+        </aside>
+      </>}
     </div>
   );
 }

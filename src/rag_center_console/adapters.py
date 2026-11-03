@@ -3,7 +3,7 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -25,6 +25,7 @@ class ProbeTarget:
     model_id: str
     protocol: str
     timeout_seconds: float
+    definition_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -669,6 +670,8 @@ async def _post_json(
                 raise HealthCheckFailure(f"无法连接供应商：{exc.__class__.__name__}") from exc
         else:
             if response.status_code in RETRYABLE_STATUS and attempt < attempts:
+                from .telemetry import note_retry
+                note_retry()
                 await pause(2 ** (attempt - 1))
                 continue
             if response.status_code >= 400:
@@ -677,6 +680,8 @@ async def _post_json(
                 return response.json()
             except ValueError as exc:
                 raise HealthCheckFailure("供应商没有返回有效 JSON") from exc
+        from .telemetry import note_retry
+        note_retry()
         await pause(2 ** (attempt - 1))
     raise HealthCheckFailure("调用供应商失败")
 
@@ -771,6 +776,8 @@ async def generate_text(
     """统一调用对话模型；只接受纯文本角色消息，供路由与回答链复用。"""
     if not messages or any(message.get("role") not in {"system", "user", "assistant"} for message in messages):
         raise HealthCheckFailure("对话消息格式无效")
+    if target.preset_id == "kimi-code":
+        temperature = 1.0
     bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
     if target.protocol == "OpenAI Chat Completions":
         url, headers = _endpoint(target.base_url, "chat/completions"), bearer
@@ -836,6 +843,8 @@ def _generation_request(
     temperature: float,
     stream: bool,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
+    if target.preset_id == "kimi-code":
+        temperature = 1.0
     bearer = {"Authorization": f"Bearer {target.api_key}", "Content-Type": "application/json"}
     if target.protocol == "OpenAI Chat Completions":
         return _endpoint(target.base_url, "chat/completions"), bearer, {
@@ -884,14 +893,16 @@ async def stream_text(
     max_tokens: int = 1200,
     temperature: float = 0.1,
     client: httpx.AsyncClient | None = None,
+    on_usage: Callable[[dict[str, int | float] | None], None] | None = None,
 ) -> AsyncIterator[str]:
-    """把三类对话协议的供应商 SSE 统一为纯文本增量。"""
+    """把三类对话协议的供应商 SSE 统一为纯文本增量，并返回最终 usage。"""
     url, headers, payload = _generation_request(
         target, messages, max_tokens=max_tokens, temperature=temperature, stream=True
     )
     owns_client = client is None
     if client is None:
         client = httpx.AsyncClient(timeout=target.timeout_seconds, follow_redirects=False, trust_env=False)
+    latest_usage: dict[str, int | float] | None = None
     try:
         try:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -908,6 +919,7 @@ async def stream_text(
                         event = json.loads(data)
                     except ValueError:
                         continue
+                    latest_usage = _stream_usage(event) or latest_usage
                     delta = _stream_delta(target.protocol, event)
                     if delta:
                         yield delta
@@ -916,8 +928,19 @@ async def stream_text(
         except httpx.RequestError as exc:
             raise HealthCheckFailure(f"无法连接供应商：{exc.__class__.__name__}") from exc
     finally:
+        if on_usage:
+            on_usage(latest_usage)
         if owns_client:
             await client.aclose()
+
+
+def _stream_usage(event: Any) -> dict[str, int | float] | None:
+    if not isinstance(event, dict):
+        return None
+    for value in (event, event.get("response"), event.get("message")):
+        if usage := _usage(value):
+            return usage
+    return None
 
 
 def _stream_delta(protocol: str, event: Any) -> str:

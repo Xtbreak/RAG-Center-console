@@ -196,3 +196,26 @@ def test_saved_provider_discovery_reuses_encrypted_key(client, monkeypatch):
     assert captured["target"].base_url == "https://new-provider.test/v1"
     assert captured["target"].protocol == "OpenAI Responses"
     assert "stored-secret" not in response.text
+
+
+def test_model_configuration_mutations_require_admin(client):
+    provider = client.post("/api/v1/providers", json={
+        "preset_id": "custom", "name": "Custom", "base_url": "https://provider.test/v1",
+        "api_key": "secret", "default_protocol": "OpenAI Chat Completions",
+    }).json()
+    model = client.post("/api/v1/models", json={
+        "provider_id": provider["id"], "name": "Chat", "model_id": "chat",
+        "model_type": "llm", "protocol": "OpenAI Chat Completions",
+    }).json()
+    client.put("/api/v1/session", json={"role": "manager"})
+    assert client.post("/api/v1/providers", json={}).status_code == 403
+    assert client.post("/api/v1/providers/discover-models", json={"provider_id": provider["id"]}).status_code == 403
+    assert client.patch(f"/api/v1/providers/{provider['id']}", json={"name": "changed"}).status_code == 403
+    assert client.post(f"/api/v1/providers/{provider['id']}/health-check").status_code == 403
+    assert client.post("/api/v1/models", json={}).status_code == 403
+    assert client.patch(f"/api/v1/models/{model['id']}", json={"name": "changed"}).status_code == 403
+    assert client.delete(f"/api/v1/models/{model['id']}").status_code == 403
+    assert client.put("/api/v1/model-defaults", json={"routing_llm": model["id"]}).status_code == 403
+    assert client.delete(f"/api/v1/providers/{provider['id']}").status_code == 403
+    client.cookies.clear()
+    assert client.delete(f"/api/v1/providers/{provider['id']}").status_code == 401

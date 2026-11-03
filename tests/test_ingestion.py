@@ -1,11 +1,15 @@
+import io
 from datetime import timedelta
 from uuid import uuid4
 
+import fitz
 import pytest
+from PIL import Image
 from qdrant_client import QdrantClient
 from sqlalchemy import func, select
 
 from rag_center_console.adapters import EmbeddingResult, HealthCheckFailure
+from rag_center_console.config import get_settings
 from rag_center_console.database import SessionLocal
 from rag_center_console.ingestion import (
     PipelineServices,
@@ -37,6 +41,16 @@ from rag_center_console.vectorstore import VectorStore, collection_name
 MARKDOWN = "# 手册\n\n" + "\n\n".join(f"第 {i} 段内容，用来测试导入流水线。" for i in range(6))
 
 
+def pdf_bytes(text=None):
+    document = fitz.open()
+    page = document.new_page()
+    if text:
+        page.insert_text((72, 72), text, fontsize=14)
+    data = document.tobytes()
+    document.close()
+    return data
+
+
 class FakeStorage:
     def __init__(self):
         self.objects = {}
@@ -59,6 +73,7 @@ class Harness:
         self.described = []
         self.describe_error = None
         self.parse_calls = []
+        self.parse_payloads = []
         self.services = PipelineServices(
             storage=self.storage,
             vector_store=self.vectors,
@@ -70,6 +85,7 @@ class Harness:
 
     def _parse(self, data, name, ext, should_cancel, llm_enhancement):
         self.parse_calls.append((name, llm_enhancement))
+        self.parse_payloads.append((ext, data))
         return self.parsed
 
     def _embed(self, target, texts, dimension):
@@ -145,6 +161,78 @@ def test_markdown_import_reaches_ready_and_indexes_every_chunk(h):
     assert chunks[0].location["heading_path"] == ["手册"]
     assert h.vectors.count(collection_name(kb_id)) == len(chunks)
     assert h.embed_calls[0][1][0].startswith("手册\n")  # 向量化文本带标题路径
+
+
+def test_local_pdf_skips_cloud_and_scanned_pdf_falls_back(h, monkeypatch):
+    monkeypatch.setattr(get_settings(), "aliyun_docmind_access_key_id", "test-id")
+    monkeypatch.setattr(get_settings(), "aliyun_docmind_access_key_secret", "test-secret")
+    job_id, document_id, _ = make_job(h, filename="native.pdf", data=pdf_bytes("NATIVE LOCAL PDF"))
+    with SessionLocal() as db:
+        document = db.get(Document, document_id)
+        document.parse_strategy = "local"
+        db.commit()
+    run(h, job_id)
+    document, _, chunks = state(document_id)
+    assert document.status == "ready" and h.parse_calls == []
+    assert any("NATIVE LOCAL PDF" in chunk.content for chunk in chunks)
+
+    job_id, document_id, _ = make_job(h, filename="scan.pdf", data=pdf_bytes())
+    with SessionLocal() as db:
+        document = db.get(Document, document_id)
+        document.parse_strategy = "local"
+        db.commit()
+    run(h, job_id)
+    document, _, _ = state(document_id)
+    assert document.status == "ready" and h.parse_calls == [("scan.pdf", False)]
+
+
+def test_semantic_import_uses_embedding_for_chunking_and_indexing(h):
+    job_id, document_id, _ = make_job(h)
+    with SessionLocal() as db:
+        document = db.get(Document, document_id)
+        document.chunk_method = "semantic"
+        document.semantic_threshold = 0.8
+        db.commit()
+    run(h, job_id)
+    document, _, chunks = state(document_id)
+    assert document.status == "ready" and chunks
+    assert len(h.embed_calls) >= 2
+
+
+def test_metadata_is_extracted_and_indexed_as_a_separate_chunk(h):
+    job_id, document_id, kb_id = make_job(h)
+    with SessionLocal() as db:
+        llm = make_model(db, "metadata-llm", None, "OpenAI Chat Completions", "llm")
+        db.add(ModelDefault(purpose="routing_llm", model_id=llm.id))
+        db.commit()
+    h.services.extract_metadata = lambda target, text: {
+        "dates": ["2026-09-01"], "versions": ["v1.0"], "subjects": ["安全中心"], "owners": ["运营部"],
+        "keywords": ["信誉分", "低分限制"], "questions": ["90 分能参加什么对局？"],
+    }
+    run(h, job_id)
+    document, _, chunks = state(document_id)
+    metadata = [chunk for chunk in chunks if chunk.kind == "metadata"]
+    assert document.status == "ready" and document.metadata_status == "ready"
+    assert len(metadata) == 1 and "2026-09-01" in metadata[0].content and "90 分" in metadata[0].content
+    assert metadata[0].location["source"] == "metadata" and metadata[0].vector_status == "indexed"
+    assert h.vectors.count(collection_name(kb_id)) == len(chunks)
+
+
+def test_metadata_failure_degrades_to_partial_import_without_losing_text(h):
+    job_id, document_id, kb_id = make_job(h)
+    with SessionLocal() as db:
+        llm = make_model(db, "metadata-llm", None, "OpenAI Chat Completions", "llm")
+        db.add(ModelDefault(purpose="routing_llm", model_id=llm.id))
+        db.commit()
+    def fail_metadata(_target, _text):
+        raise HealthCheckFailure("模型限流")
+    h.services.extract_metadata = fail_metadata
+    run(h, job_id)
+    document, _, chunks = state(document_id)
+    assert document.status == "partial_failed" and document.metadata_status == "failed"
+    assert "元数据构建失败" in document.error_message and "模型限流" in document.error_message
+    assert chunks and all(chunk.kind != "metadata" for chunk in chunks)
+    assert h.vectors.count(collection_name(kb_id)) == len(chunks)
 
 
 def test_partial_embedding_failure_is_reported(h):
@@ -243,6 +331,45 @@ def test_cloud_image_gets_vision_description_when_model_is_configured(h):
     assert document.status == "ready" and h.described == [("vision-1", "image/png")]
     assert h.parse_calls == [("chart.png", True)]  # 默认智能解析开启大模型增强
     assert [c.kind for c in chunks] == ["text", "image"] and "一张折线图" in chunks[1].content
+
+
+def test_embedded_image_is_fetched_described_and_signed_url_is_not_persisted(h):
+    source_url = "https://bucket.oss-cn-hangzhou.aliyuncs.com/image.png?signature=secret"
+    h.parsed = ParsedDocument([
+        Element("paragraph", "正文"),
+        Element("image", "OCR 图中文字", page=2, extra={"source_url": source_url, "region": [1, 2]}),
+    ])
+    fetched = []
+    h.services.fetch_image = lambda url: (fetched.append(url) or (b"image", "image/png"))
+    job_id, document_id, _ = make_job(h, filename="with-image.docx", data=b"docx")
+    with SessionLocal() as db:
+        vision = make_model(db, "vision-embedded", None, "OpenAI Chat Completions", "vision")
+        db.add(ModelDefault(purpose="vision", model_id=vision.id))
+        db.commit()
+    run(h, job_id)
+    document, _, chunks = state(document_id)
+    assert document.status == "ready" and fetched == [source_url]
+    assert h.described == [("vision-embedded", "image/png")]
+    assert "一张折线图" in chunks[-1].content and chunks[-1].location["page"] == 2
+    assert all("source_url" not in chunk.location for chunk in chunks)
+
+
+@pytest.mark.parametrize("extension", ["webp", "tiff"])
+def test_webp_and_tiff_are_converted_for_cloud_ocr_and_vision(h, extension):
+    output = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(output, format=extension.upper())
+    original = output.getvalue()
+    job_id, document_id, _ = make_job(h, filename=f"scan.{extension}", data=original)
+    with SessionLocal() as db:
+        vision = make_model(db, f"vision-{extension}", None, "OpenAI Chat Completions", "vision")
+        db.add(ModelDefault(purpose="vision", model_id=vision.id))
+        db.commit()
+    run(h, job_id)
+    document, _, _ = state(document_id)
+    assert document.status == "ready"
+    assert h.parse_payloads[0][0] == "png" and h.parse_payloads[0][1].startswith(b"\x89PNG")
+    assert h.described[0][1] == "image/png"
+    assert list(h.storage.objects.values()) == [original]
 
 
 def test_image_without_vision_model_or_with_failing_one_is_partial(h):

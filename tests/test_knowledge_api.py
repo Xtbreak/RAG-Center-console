@@ -51,6 +51,7 @@ def env(client, monkeypatch):
 
 
 def create_embedding_model(client, model_id="embed-1", dimension=8, model_type="embedding", name="p"):
+    client.put("/api/v1/session", json={"role": "admin"})
     provider = client.post("/api/v1/providers", json={
         "preset_id": "custom", "name": name, "base_url": "https://api.test/v1",
         "api_key": "sk-test-key-1234", "default_protocol": "OpenAI Embeddings",
@@ -61,6 +62,7 @@ def create_embedding_model(client, model_id="embed-1", dimension=8, model_type="
         payload["vector_dimension"] = dimension
     response = client.post("/api/v1/models", json=payload)
     assert response.status_code == 201, response.text
+    client.put("/api/v1/session", json={"role": "manager"})
     return response.json()["id"]
 
 
@@ -135,7 +137,7 @@ def test_upload_rejections(env, monkeypatch):
     too_big = upload(client, kb["id"], "a.md", b"x" * 20)
     assert too_big.status_code == 413 and "上限" in too_big.json()["detail"]
     monkeypatch.setattr(get_settings(), "max_upload_bytes", 1024)
-    pdf = upload(client, kb["id"], "a.pdf", b"%PDF-1.7", "application/pdf")
+    pdf = upload(client, kb["id"], "a.pdf", b"%PDF-1.7", "application/pdf", parse_strategy="fast")
     assert pdf.status_code == 422 and "阿里云" in pdf.json()["detail"]
     storage.fail = True
     assert upload(client, kb["id"]).status_code == 503
@@ -267,24 +269,44 @@ def test_delete_document_and_knowledge_base_purges_storage(env):
 def test_models_used_by_a_knowledge_base_cannot_be_deleted(env):
     client, *_ = env
     kb = create_kb(client)
+    client.put("/api/v1/session", json={"role": "admin"})
     response = client.delete(f"/api/v1/models/{kb['embedding_model_id']}")
     assert response.status_code == 409 and "产品手册" in response.json()["detail"]
     provider_id = client.get("/api/v1/models").json()[0]["provider_id"]
     assert client.delete(f"/api/v1/providers/{provider_id}").status_code == 409
+    model_id = kb["embedding_model_id"]
+    assert client.patch(f"/api/v1/models/{model_id}", json={"model_id": "replacement"}).status_code == 409
+    assert client.patch(f"/api/v1/models/{model_id}", json={"vector_dimension": 16}).status_code == 409
+    assert client.patch(f"/api/v1/models/{model_id}", json={"enabled": False}).status_code == 409
+    assert client.patch(f"/api/v1/models/{model_id}", json={"name": "允许修改名称"}).status_code == 200
+    assert client.put("/api/v1/model-defaults", json={"routing_llm": model_id}).status_code == 422
 
 
 def test_chunk_method_defaults_overrides_and_validation(env):
     client, *_ = env
-    kb = create_kb(client, chunk_method="recursive", heading_level=3, chunk_size=600, chunk_overlap=60)
+    kb = create_kb(client, chunk_method="recursive", heading_level=3, chunk_size=600, chunk_overlap=60, separators=["||"], semantic_threshold=0.82)
     assert (kb["chunk_method"], kb["heading_level"]) == ("recursive", 3)
-    assert client.post("/api/v1/knowledge-bases", json={"name": "x", "embedding_model_id": kb["embedding_model_id"], "chunk_method": "semantic"}).status_code == 422
+    assert kb["separators"] == ["||"] and kb["semantic_threshold"] == 0.82
+    assert client.post("/api/v1/knowledge-bases", json={"name": "empty-separators", "embedding_model_id": kb["embedding_model_id"], "separators": []}).status_code == 422
+    assert client.post("/api/v1/knowledge-bases", json={"name": "x", "embedding_model_id": kb["embedding_model_id"], "chunk_method": "unsupported"}).status_code == 422
     assert client.post("/api/v1/knowledge-bases", json={"name": "y", "embedding_model_id": kb["embedding_model_id"], "heading_level": 7}).status_code == 422
 
     inherited = upload(client, kb["id"]).json()
     assert (inherited["chunk_method"], inherited["chunk_size"], inherited["chunk_overlap"], inherited["heading_level"]) == ("recursive", 600, 60, 3)
+    assert inherited["separators"] == ["||"] and inherited["semantic_threshold"] == 0.82
+    assert upload(client, kb["id"], "empty-separators.md", b"# empty", separators="[]").status_code == 422
+    assert client.patch(f"/api/v1/knowledge-bases/{kb['id']}", json={"separators": []}).status_code == 422
 
     custom = upload(client, kb["id"], "b.md", "# 另一份".encode(), chunk_method="heading", chunk_size=1200, chunk_overlap=0, heading_level=2).json()
     assert (custom["chunk_method"], custom["chunk_size"], custom["chunk_overlap"], custom["heading_level"]) == ("heading", 1200, 0, 2)
+
+    semantic = upload(
+        client, kb["id"], "semantic.md", b"# semantic", chunk_method="semantic",
+        semantic_threshold=0.82, separators='["||", "\\n\\n"]',
+    ).json()
+    assert semantic["chunk_method"] == "semantic" and semantic["semantic_threshold"] == 0.82
+    assert semantic["separators"] == ["||", "\n\n"]
+    assert upload(client, kb["id"], "bad-separators.md", b"# bad", separators="not-json").status_code == 422
 
     assert upload(client, kb["id"], "c.md", b"# c", chunk_size=100, chunk_overlap=100).status_code == 422
     assert upload(client, kb["id"], "d.md", b"# d", chunk_size=50).status_code == 422

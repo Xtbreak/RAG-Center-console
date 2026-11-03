@@ -6,9 +6,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .adapters import DiscoveryTarget, HealthCheckFailure, discover_models
-from .auth import SESSION_COOKIE
+from .auth import SESSION_COOKIE, require_roles
 from .database import get_db
-from .models import AnonymousSession, KnowledgeBase, ModelDefault, ModelDefinition, Provider, Role
+from .models import AnonymousSession, KnowledgeBase, ModelDefault, ModelDefinition, ModelType, Provider, Role
 from .schemas import (
     DiscoveredModel,
     HealthCheckRead,
@@ -30,7 +30,15 @@ from .services import check_provider_health, first_enabled_model
 
 
 router = APIRouter()
+require_admin = require_roles(Role.ADMIN)
+admin_router = APIRouter(dependencies=[Depends(require_admin)])
 DEFAULT_PURPOSES = ("routing_embedding", "routing_llm", "default_rerank", "vision")
+DEFAULT_PURPOSE_TYPES = {
+    "routing_embedding": ModelType.EMBEDDING,
+    "routing_llm": ModelType.LLM,
+    "default_rerank": ModelType.RERANK,
+    "vision": ModelType.VISION,
+}
 
 
 def _valid_uuid(value: str | None) -> str | None:
@@ -101,7 +109,7 @@ def list_providers(db: Session = Depends(get_db)) -> list[ProviderRead]:
     return [_provider_read(provider) for provider in providers]
 
 
-@router.post("/providers", response_model=ProviderRead, status_code=status.HTTP_201_CREATED)
+@admin_router.post("/providers", response_model=ProviderRead, status_code=status.HTTP_201_CREATED)
 def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> ProviderRead:
     try:
         secret_box = get_secret_box()
@@ -122,7 +130,7 @@ def create_provider(payload: ProviderCreate, db: Session = Depends(get_db)) -> P
     return _provider_read(provider)
 
 
-@router.post("/providers/discover-models", response_model=ModelDiscoveryResponse)
+@admin_router.post("/providers/discover-models", response_model=ModelDiscoveryResponse)
 async def discover_provider_models(
     payload: ModelDiscoveryRequest,
     db: Session = Depends(get_db),
@@ -170,7 +178,7 @@ async def discover_provider_models(
     )
 
 
-@router.patch("/providers/{provider_id}", response_model=ProviderRead)
+@admin_router.patch("/providers/{provider_id}", response_model=ProviderRead)
 def update_provider(provider_id: str, payload: ProviderUpdate, db: Session = Depends(get_db)) -> ProviderRead:
     provider = db.get(Provider, provider_id)
     if provider is None:
@@ -195,7 +203,7 @@ def update_provider(provider_id: str, payload: ProviderUpdate, db: Session = Dep
     return _provider_read(provider)
 
 
-@router.delete("/providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
+@admin_router.delete("/providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_provider(provider_id: str, db: Session = Depends(get_db)) -> Response:
     provider = db.get(Provider, provider_id)
     if provider is None:
@@ -213,7 +221,7 @@ def delete_provider(provider_id: str, db: Session = Depends(get_db)) -> Response
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/providers/{provider_id}/health-check", response_model=HealthCheckRead)
+@admin_router.post("/providers/{provider_id}/health-check", response_model=HealthCheckRead)
 async def health_check_provider(
     provider_id: str,
     model_id: str | None = None,
@@ -241,7 +249,7 @@ def list_models(provider_id: str | None = None, db: Session = Depends(get_db)) -
     return list(db.scalars(query).all())
 
 
-@router.post("/models", response_model=ModelRead, status_code=status.HTTP_201_CREATED)
+@admin_router.post("/models", response_model=ModelRead, status_code=status.HTTP_201_CREATED)
 def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> ModelDefinition:
     if db.get(Provider, payload.provider_id) is None:
         raise HTTPException(status_code=404, detail="供应商不存在")
@@ -256,12 +264,23 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> ModelDe
     return model
 
 
-@router.patch("/models/{model_id}", response_model=ModelRead)
+@admin_router.patch("/models/{model_id}", response_model=ModelRead)
 def update_model(model_id: str, payload: ModelUpdate, db: Session = Depends(get_db)) -> ModelDefinition:
     model = db.get(ModelDefinition, model_id)
     if model is None:
         raise HTTPException(status_code=404, detail="模型不存在")
     changes = payload.model_dump(exclude_unset=True, mode="json")
+    in_use = db.scalar(select(KnowledgeBase.name).where(KnowledgeBase.embedding_model_id == model.id).limit(1))
+    incompatible_change = any(
+        (
+            changes.get("model_id", model.model_id) != model.model_id,
+            changes.get("model_type", model.model_type) != model.model_type,
+            changes.get("vector_dimension", model.vector_dimension) != model.vector_dimension,
+            changes.get("enabled", model.enabled) is False,
+        )
+    )
+    if in_use and incompatible_change:
+        raise HTTPException(status_code=409, detail=f"知识库“{in_use}”正在使用该模型，禁止修改模型 ID、类型、维度或停用")
     next_type = changes.get("model_type", model.model_type)
     next_dimension = changes.get("vector_dimension", model.vector_dimension)
     if next_type == "embedding" and next_dimension is None:
@@ -277,7 +296,7 @@ def update_model(model_id: str, payload: ModelUpdate, db: Session = Depends(get_
     return model
 
 
-@router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
+@admin_router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model(model_id: str, db: Session = Depends(get_db)) -> Response:
     model = db.get(ModelDefinition, model_id)
     if model is None:
@@ -298,11 +317,16 @@ def get_model_defaults(db: Session = Depends(get_db)) -> ModelDefaultsRead:
     return ModelDefaultsRead(**values)
 
 
-@router.put("/model-defaults", response_model=ModelDefaultsRead)
+@admin_router.put("/model-defaults", response_model=ModelDefaultsRead)
 def update_model_defaults(payload: ModelDefaultsUpdate, db: Session = Depends(get_db)) -> ModelDefaultsRead:
     for purpose, model_id in payload.model_dump().items():
-        if model_id is not None and db.get(ModelDefinition, model_id) is None:
+        model = db.get(ModelDefinition, model_id) if model_id is not None else None
+        if model_id is not None and model is None:
             raise HTTPException(status_code=404, detail=f"{purpose} 对应的模型不存在")
+        if model is not None and model.model_type != DEFAULT_PURPOSE_TYPES[purpose].value:
+            raise HTTPException(status_code=422, detail=f"{purpose} 需要 {DEFAULT_PURPOSE_TYPES[purpose].value} 类型模型")
+        if model is not None and not model.enabled:
+            raise HTTPException(status_code=422, detail=f"{purpose} 对应的模型已停用")
         item = db.get(ModelDefault, purpose)
         if item is None:
             db.add(ModelDefault(purpose=purpose, model_id=model_id))

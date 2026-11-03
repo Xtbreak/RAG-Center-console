@@ -1,11 +1,15 @@
 export type Role = "admin" | "manager" | "user";
 
-export type ChunkMethod = "heading" | "recursive";
+export type ChunkMethod = "heading" | "fixed" | "recursive" | "semantic";
 
 export const chunkMethodCopy: Record<ChunkMethod, { name: string; detail: string }> = {
-  heading: { name: "按标题切分", detail: "按文档标题划分章节，每节独立成段，过长的章节再递归切分。无 Markdown 标题时自动识别“第一章、一、（一）、1.1”等编号标题。适合制度、手册、规范。" },
-  recursive: { name: "递归切分", detail: "依次按段落、换行、句子、标点切分，再合并到目标长度，不受标题边界限制。适合结构不规整的文本。" },
+  heading: { name: "按标题切分", detail: "按文档标题划分章节，每节独立成段，过长的章节再递归切分。无 Markdown 标题时自动识别编号标题。" },
+  fixed: { name: "固定切分", detail: "严格按目标 Token 长度硬切分，并保留指定重叠；不按标题、段落或句子调整边界。" },
+  recursive: { name: "递归切分", detail: "按你配置的分隔符优先级递归切分，再合并到目标长度，可设置段落、换行、空格和自定义格式。" },
+  semantic: { name: "语义切分", detail: "使用当前知识库的 Embedding 比较相邻内容，在语义变化超过阈值或达到长度时分段，会产生额外向量调用。" },
 };
+
+export const DEFAULT_CHUNK_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "!", "?", "；", ";", ". ", "，", ",", "、", " "];
 
 export type KnowledgeBase = {
   id: string;
@@ -20,6 +24,8 @@ export type KnowledgeBase = {
   chunkOverlap: number;
   chunkMethod: ChunkMethod;
   headingLevel: number;
+  separators: string[];
+  semanticThreshold: number;
   status: "ready" | "rebuilding" | "rebuild_failed";
   rebuildError: string | null;
   documentCount: number;
@@ -99,12 +105,22 @@ export type DocumentStatus =
   | "uploaded"
   | "parsing"
   | "enhancing"
+  | "metadata"
   | "chunking"
   | "embedding"
   | "ready"
   | "partial_failed"
   | "failed"
   | "cancelled";
+
+export type DocumentMetadata = {
+  dates: string[];
+  versions: string[];
+  subjects: string[];
+  owners: string[];
+  keywords: string[];
+  questions: string[];
+};
 
 export type KnowledgeDocument = {
   id: string;
@@ -114,12 +130,17 @@ export type KnowledgeDocument = {
   sizeBytes: number;
   status: DocumentStatus;
   errorMessage: string | null;
-  parseStrategy: "smart" | "fast";
+  parseStrategy: "local" | "smart" | "fast";
   enhanceImages: boolean;
   chunkMethod: ChunkMethod;
   chunkSize: number;
   chunkOverlap: number;
   headingLevel: number;
+  separators: string[];
+  semanticThreshold: number;
+  metadata: DocumentMetadata;
+  metadataStatus: "pending" | "extracting" | "ready" | "failed" | "skipped";
+  metadataError: string | null;
   chunkCount: number;
   jobId: string | null;
   jobStatus: "queued" | "running" | "succeeded" | "failed" | "cancelled" | null;
@@ -141,7 +162,7 @@ export type KnowledgeChunk = {
   id: string;
   documentId: string;
   position: number;
-  kind: "text" | "table" | "image";
+  kind: "text" | "table" | "image" | "metadata";
   content: string;
   tokenCount: number;
   location: ChunkLocation;

@@ -4,18 +4,34 @@ import bisect
 import hashlib
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .parsing import Element, ParsedDocument
 
-ChunkMethod = Literal["heading", "recursive"]
-CHUNK_METHODS: tuple[str, ...] = ("heading", "recursive")
+ChunkMethod = Literal["heading", "fixed", "recursive", "semantic"]
+CHUNK_METHODS: tuple[str, ...] = ("heading", "fixed", "recursive", "semantic")
+SemanticEmbed = Callable[[list[str]], list[list[float]]]
 
 # 中日韩文字及全角标点各按约 1 Token 计
 _CJK = re.compile(r"[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af\uff00-\uffef]")
 # 递归切分的分隔符优先级：段落 → 换行 → 句末标点 → 句内标点 → 空格 → 单字符
 DEFAULT_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", "。", "！", "？", "!", "?", "；", ";", ". ", "，", ",", "、", " ", "")
+
+
+def normalize_separators(values: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    if values is None:
+        return DEFAULT_SEPARATORS
+    if len(values) > 20:
+        raise ValueError("分隔符最多 20 个")
+    cleaned: list[str] = []
+    for value in values:
+        if not value or len(value) > 32:
+            raise ValueError("分隔符不能为空且不能超过 32 个字符")
+        if value not in cleaned:
+            cleaned.append(value)
+    return tuple([*cleaned, ""])
 
 
 def estimate_tokens(text: str) -> int:
@@ -93,6 +109,56 @@ def recursive_split(
         if start < end and (not trimmed or trimmed[-1] != (start, end)):
             trimmed.append((start, end))
     return trimmed
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        raise ValueError("语义切分向量维度不一致")
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    denominator = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return numerator / denominator if denominator else 0.0
+
+
+def _semantic_spans(
+    text: str,
+    size: int,
+    overlap: int,
+    threshold: float,
+    embed: SemanticEmbed,
+) -> list[tuple[int, int]]:
+    pieces = _atomic_spans(text, 0, len(text), size, DEFAULT_SEPARATORS)
+    if len(pieces) < 2:
+        return pieces
+    vectors = embed([text[start:end].strip() for start, end in pieces])
+    if len(vectors) != len(pieces):
+        raise ValueError("语义切分向量数量与候选片段不一致")
+    weights = [_token_weight(text[start:end]) for start, end in pieces]
+    groups: list[tuple[int, int]] = []
+    group_start = 0
+    group_weight = weights[0]
+    for index in range(1, len(pieces)):
+        similarity = _cosine(vectors[index - 1], vectors[index])
+        if group_weight + weights[index] > size or similarity < threshold:
+            groups.append((group_start, index))
+            group_start = index
+            group_weight = 0.0
+        group_weight += weights[index]
+    groups.append((group_start, len(pieces)))
+    chunks: list[tuple[int, int]] = []
+    for group_start, group_end in groups:
+        start_index = group_start
+        overlap_weight = 0.0
+        while start_index > 0 and overlap_weight + weights[start_index - 1] <= overlap:
+            start_index -= 1
+            overlap_weight += weights[start_index]
+        start, end = pieces[start_index][0], pieces[group_end - 1][1]
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start < end:
+            chunks.append((start, end))
+    return chunks
 
 
 _CN_NUM = "一二三四五六七八九十百千零〇两"
@@ -221,10 +287,22 @@ class _TextStream:
         return "".join(self.parts)
 
 
-def _split_stream(stream: _TextStream, size: int, overlap: int, kind: str = "text") -> list[ChunkDraft]:
+def _split_stream(
+    stream: _TextStream,
+    size: int,
+    overlap: int,
+    kind: str = "text",
+    separators: tuple[str, ...] = DEFAULT_SEPARATORS,
+    semantic_threshold: float = 0.75,
+    semantic_embed: SemanticEmbed | None = None,
+) -> list[ChunkDraft]:
     text = stream.text()
+    if semantic_embed:
+        spans = _semantic_spans(text, size, overlap, semantic_threshold, semantic_embed)
+    else:
+        spans = recursive_split(text, size, overlap, separators)
     drafts = []
-    for start, end in recursive_split(text, size, overlap):
+    for start, end in spans:
         content = text[start:end]
         path, page = stream.location_at(start)
         drafts.append(ChunkDraft(kind, content, estimate_tokens(content), _location(path, page)))
@@ -237,16 +315,17 @@ def chunk_document(
     chunk_overlap: int,
     method: ChunkMethod = "heading",
     heading_level: int = 6,
+    separators: list[str] | tuple[str, ...] | None = None,
+    semantic_threshold: float = 0.75,
+    semantic_embed: SemanticEmbed | None = None,
 ) -> list[ChunkDraft]:
-    """把解析结果切成分段。
-
-    - heading：按标题划分章节（第 1 至 heading_level 级标题为边界，更深的标题并入所属章节），
-      每节独立成段，超长章节再递归切分；无 Markdown 标题时自动识别中文编号标题。
-    - recursive：忽略标题边界，按段落、换行、句子、标点逐级递归切分并合并到目标长度。
-
-    两种方式下表格都按表头分组数据行，图片描述单独成段。
-    """
+    """按标题、固定长度、自定义递归或 Embedding 语义相似度切分文档。"""
+    if method == "semantic" and semantic_embed is None:
+        raise ValueError("语义切分需要提供 Embedding 调用")
+    if not 0 < semantic_threshold < 1:
+        raise ValueError("语义相似度阈值必须在 0 和 1 之间")
     overlap = min(max(chunk_overlap, 0), max(chunk_size - 1, 0))
+    separator_tuple = ("",) if method == "fixed" else normalize_separators(separators)
     elements = detect_numbered_headings(parsed.elements) if method == "heading" else parsed.elements
     drafts: list[ChunkDraft] = []
     headings: list[tuple[int, str]] = []
@@ -258,7 +337,16 @@ def chunk_document(
     def flush() -> None:
         nonlocal stream
         if stream.parts:
-            drafts.extend(_split_stream(stream, chunk_size, overlap))
+            drafts.extend(
+                _split_stream(
+                    stream,
+                    chunk_size,
+                    overlap,
+                    separators=separator_tuple,
+                    semantic_threshold=semantic_threshold,
+                    semantic_embed=semantic_embed if method == "semantic" else None,
+                )
+            )
         stream = _TextStream()
 
     for element in elements:
@@ -272,15 +360,15 @@ def chunk_document(
             while headings and headings[-1][0] >= element.level:
                 headings.pop()
             headings.append((element.level, element.text))
-            if method == "recursive":
+            if method != "heading":
                 stream.add(element.text, path(), element.page)
         elif element.kind == "table":
             flush()
             drafts.extend(_table_chunks(element, chunk_size, _location(path(), element.page)))
-        elif element.kind == "image":
+        elif element.kind == "image" and element.text.strip():
             flush()
             location = {**_location(path(), element.page), **element.extra}
-            drafts.append(ChunkDraft("image", element.text, estimate_tokens(element.text), location))
+            drafts.append(ChunkDraft("image", element.text.strip(), estimate_tokens(element.text.strip()), location))
         elif element.text.strip():
             stream.add(element.text.strip(), path(), element.page)
     flush()

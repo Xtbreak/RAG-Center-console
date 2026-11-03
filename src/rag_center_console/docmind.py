@@ -1,13 +1,13 @@
-"""阿里云文档智能（文档解析·大模型版）适配器：提交 → 轮询 → 分页取回 layouts → 转为结构化片段。
-
-结果中 layouts 的字段按官方常见返回格式（type、subType、level、pageNum、text、markdownContent、pos）容错解析，
-在配置真实 AccessKey 完成验证前视为“未验证”。
-"""
+"""阿里云文档智能适配器：提交、轮询、分页取回并转换结构化片段。"""
 
 import io
+import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from .parsing import Element, ParsedDocument, ParseError, parse_markdown
 
@@ -62,7 +62,10 @@ def layouts_to_elements(layouts: list[dict[str, Any]]) -> list[Element]:
             elif text or markdown:
                 elements.append(Element("paragraph", text=text or markdown, page=page))
         elif kind in _IMAGE_TYPES:
-            elements.append(Element("image", text=text, page=page, extra=extra))
+            source = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", markdown)
+            if source:
+                extra["source_url"] = source.group(1)
+            elements.append(Element("image", text="" if text == "[empty]" else text, page=page, extra=extra))
         elif kind == "title" or "title" in sub_kind:
             if text:
                 level = layout.get("level")
@@ -70,6 +73,30 @@ def layouts_to_elements(layouts: list[dict[str, Any]]) -> list[Element]:
         elif text:
             elements.append(Element("paragraph", text=text, page=page))
     return elements
+
+
+def fetch_docmind_image(url: str) -> tuple[bytes, str]:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not (
+        parsed.hostname == "aliyuncs.com" or parsed.hostname.endswith(".aliyuncs.com")
+    ):
+        raise ParseError("文档图片来源地址不受支持")
+    try:
+        with httpx.Client(timeout=30, follow_redirects=False, trust_env=False) as client:
+            with client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    raise ParseError(f"下载文档内嵌图片失败（HTTP {response.status_code}）")
+                mime = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if mime not in {"image/png", "image/jpeg", "image/webp", "image/tiff"}:
+                    raise ParseError("文档图片下载结果不是支持的图片格式")
+                data = bytearray()
+                for block in response.iter_bytes():
+                    data.extend(block)
+                    if len(data) > 20 * 1024 * 1024:
+                        raise ParseError("文档内嵌图片超过 20 MB，无法生成视觉描述")
+    except httpx.HTTPError as exc:
+        raise ParseError("下载文档内嵌图片时发生网络错误") from exc
+    return bytes(data), "image/jpeg" if mime == "image/jpg" else mime
 
 
 def _safe_markdown(markdown: str) -> list[Element]:
